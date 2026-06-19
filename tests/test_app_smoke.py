@@ -28,7 +28,7 @@ def test_authenticated_portfolio_page_starts_without_paid_keys(monkeypatch):
     app.text_input(key="login_password").input("test")
     app.button[0].click().run(timeout=30)
     assert not app.exception
-    assert app.radio[0].options == ["Portfolio", "Market Data & News", "Strategy", "Rebalance", "Settings"]
-    for section in app.radio[0].options[1:]:
+    assert app.radio[0].options == ["◫  Portfolio", "◉  Market", "◇  Strategy", "↻  Rebalance", "⚙  Settings"]
+    for section in ["Market Data & News", "Strategy", "Rebalance", "Settings"]:
         app.radio[0].set_value(section).run(timeout=30)
         assert not app.exception, section

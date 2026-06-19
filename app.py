@@ -30,12 +30,23 @@ from screenshot_parser import (create_holding_from_screenshot_data, parse_scalab
 from scoring import score_assets
 from sentiment_engine import classify_sentiment, create_market_sentiment_summary
 from storage import ScreenshotStorage
+from styles import inject_premium_css
 from strategy_engine import (create_strategy_explanation, get_current_strategy,
                              refresh_market_strategy)
 from supabase_client import SupabaseConnectionError, SupabaseGateway, get_supabase_client
+from ui_components import (create_allocation_chart, create_current_vs_target_chart,
+                           create_portfolio_value_chart, create_savings_plan_before_after_chart,
+                           create_winners_losers_chart, render_alert, render_data_quality_badge,
+                           render_empty_state, render_flow_steps, render_hero_summary,
+                           render_metric_card, render_news_card, render_page_header,
+                           render_rebalance_summary, render_recommendation_card,
+                           render_section_card, render_status_pill, render_strategy_summary_card,
+                           style_figure)
 from valuation import calculate_historical_gains, portfolio_market_history, valuate_holdings
 
-st.set_page_config(page_title="Market-Aware Wealth Manager", page_icon="⚖️", layout="wide")
+st.set_page_config(page_title="Financial Hub", page_icon="◆", layout="wide",
+                   initial_sidebar_state="expanded")
+inject_premium_css()
 
 HOLDING_DISPLAY = {"instrument": "Instrument", "isin": "ISIN", "ticker_id": "Ticker/ID",
     "price_symbol": "Price Symbol", "asset_type": "Asset type", "category": "Category", "quantity": "Quantity",
@@ -193,7 +204,7 @@ def recompute_models():
 
 def refresh_live_data(force=False):
     if not st.session_state.settings["live_enabled"]:
-        st.warning("Live market data is disabled in Settings.")
+        render_alert("Live market data is paused in Settings.", "warning")
         return
     if force:
         cached_quote.clear()
@@ -216,7 +227,7 @@ def refresh_live_data(force=False):
     recompute_models()
     failed = [symbol for symbol, quote in quotes.items() if not quote.is_available]
     if failed:
-        st.warning("Live price unavailable; run Data Enrichment, then use manual fallback after failed enrichment: " + ", ".join(failed))
+        render_alert("Live price unavailable; run Data Enrichment, then use manual fallback after enrichment failed: " + ", ".join(failed), "warning")
 
 
 def refresh_controls(key: str):
@@ -233,22 +244,21 @@ def _gain_metric(column, label, gain):
 
 
 def valuation_dashboard():
-    st.header("Valuation Dashboard")
-    st.warning("Internet prices are research estimates. Check final live buy/sell prices manually in Scalable Capital before execution.")
+    render_section_card("Live valuation", "Estimated portfolio value, performance windows, and data-quality diagnostics.")
+    render_alert("Internet prices are research estimates. Check final live buy/sell prices manually in Scalable Capital before execution.", "warning")
     refresh_controls("valuation_refresh")
     details, history = st.session_state.valuation_details, database.load_snapshots()
     total, invested, profit = calculate_total_value(details), calculate_total_invested(details), calculate_unrealised_pl(details)
     cash = float(details.loc[details["category"] == "Cash", "current_value_eur"].sum())
     gains = calculate_historical_gains(total, history)
     cards = st.columns(4)
-    cards[0].metric("Portfolio value", f"€{total:,.2f}")
-    _gain_metric(cards[1], "Daily gain", gains["daily"])
-    _gain_metric(cards[2], "Weekly gain", gains["weekly"])
-    _gain_metric(cards[3], "Monthly gain", gains["monthly"])
-    cards2 = st.columns(3)
-    _gain_metric(cards2[0], "Yearly gain", gains["yearly"])
-    cards2[1].metric("Unrealised P/L", f"€{profit:+,.2f}", f"{profit / invested * 100:+.2f}%" if invested else None)
-    cards2[2].metric("Cash", f"€{cash:,.2f}")
+    with cards[0]: render_metric_card("Portfolio value", f"€{total:,.2f}")
+    for column, label, period in zip(cards[1:], ["Daily gain", "Weekly gain", "Monthly gain"], ["daily", "weekly", "monthly"]):
+        gain = gains[period]
+        with column:
+            render_metric_card(label, "Not enough history" if gain is None else f"€{gain['eur']:+,.2f}",
+                               None if gain is None else f"{gain['pct']:+.2f}%",
+                               "positive" if gain and gain["eur"] >= 0 else "negative")
     if st.button("Save today's valuation snapshot"):
         now = datetime.now().astimezone()
         snapshot = {"date": now.date().isoformat(), "timestamp": now.isoformat(timespec="seconds"),
@@ -256,34 +266,32 @@ def valuation_dashboard():
             **{f"{period}_gain_eur": gains[period]["eur"] if gains[period] else 0 for period in ["daily", "weekly", "monthly", "yearly"]},
             **{f"{period}_gain_pct": gains[period]["pct"] if gains[period] else 0 for period in ["daily", "weekly", "monthly", "yearly"]}}
         database.save_snapshot(snapshot)
-        st.success("Snapshot saved permanently in Supabase.")
+        st.toast("Valuation snapshot saved to Supabase", icon="✓")
         history = database.load_snapshots()
     market_history = portfolio_market_history(details, st.session_state.quotes)
     if market_history.empty and not history.empty:
         market_history = history.rename(columns={"timestamp": "date", "total_value_eur": "portfolio_value_eur"})
         market_history["daily_gain_eur"] = market_history["portfolio_value_eur"].diff().fillna(0)
     left, right = st.columns(2)
-    left.plotly_chart(px.line(market_history, x="date", y="portfolio_value_eur", title="Portfolio live value over time"), width="stretch", key="valuation_history_chart")
+    left.plotly_chart(create_portfolio_value_chart(market_history), width="stretch", key="valuation_history_chart")
     allocation = calculate_allocation(details)
-    right.plotly_chart(px.pie(allocation, names="category", values="value", hole=.4, title="Current allocation"), width="stretch", key="valuation_allocation_chart")
+    right.plotly_chart(create_allocation_chart(allocation), width="stretch", key="valuation_allocation_chart")
     comparison = st.session_state.drift.melt(id_vars="category",
         value_vars=["current_weight", "target_weight"], var_name="Allocation", value_name="Weight %")
-    st.plotly_chart(px.bar(comparison, x="category", y="Weight %", color="Allocation", barmode="group",
-                           title="Current vs target allocation"), width="stretch", key="valuation_target_chart")
+    st.plotly_chart(create_current_vs_target_chart(comparison), width="stretch", key="valuation_target_chart")
     missing = details[details["price_source"] == "Missing"]
     fallback = details[(details["price_source"] == "Manual fallback") & (details["category"] != "Cash")]
     if not missing.empty:
-        st.warning("Missing live and manual prices: " + ", ".join(missing["instrument"]))
+        render_alert("Missing live and fallback prices: " + ", ".join(missing["instrument"]), "danger")
     if not fallback.empty:
-        st.warning("Live price unavailable, using manual price: " + ", ".join(fallback["instrument"]))
+        render_alert("Live price unavailable; using manual fallback after enrichment failed: " + ", ".join(fallback["instrument"]), "warning")
     chart_left, chart_right = st.columns(2)
     holdings_chart = details.sort_values("current_value_eur")
-    chart_left.plotly_chart(px.bar(holdings_chart, x="current_value_eur", y="instrument", orientation="h",
-                                   title="Holdings value"), width="stretch", key="valuation_holdings_chart")
+    holdings_figure = style_figure(px.bar(holdings_chart, x="current_value_eur", y="instrument", orientation="h",
+                                   title="Holdings value", color_discrete_sequence=["#176B87"]), showlegend=False)
+    chart_left.plotly_chart(holdings_figure, width="stretch", key="valuation_holdings_chart")
     winners = details.sort_values("daily_gain_eur")
-    chart_right.plotly_chart(px.bar(winners, x="instrument", y="daily_gain_eur", color="daily_gain_eur",
-                                    title="Daily winners and losers",
-                                    color_continuous_scale=["#B91C1C", "#E5E7EB", "#15803D"]), width="stretch", key="valuation_winners_chart")
+    chart_right.plotly_chart(create_winners_losers_chart(winners), width="stretch", key="valuation_winners_chart")
     st.dataframe(details, width="stretch", hide_index=True)
     x, y = st.columns(2)
     x.download_button("Export valuation history CSV", history.to_csv(index=False), "valuation_history.csv", "text/csv")
@@ -293,40 +301,41 @@ def valuation_dashboard():
 
 
 def dashboard():
-    st.header("Dashboard")
     details = st.session_state.valuation_details
-    total = calculate_total_value(details)
-    invested = calculate_total_invested(details)
-    profit = calculate_unrealised_pl(details)
-    cash = float(details.loc[details["category"] == "Cash", "current_value_eur"].sum())
-    columns = st.columns(6)
-    columns[0].metric("Portfolio value", f"€{total:,.2f}")
-    columns[1].metric("Invested value", f"€{invested:,.2f}")
-    columns[2].metric("Unrealised P/L", f"€{profit:+,.2f}", f"{profit / invested * 100:+.2f}%" if invested else None)
-    columns[3].metric("Cash", f"€{cash:,.2f}")
-    columns[4].metric("Holdings", len(details))
-    columns[5].metric("Candidates", len(st.session_state.candidates))
+    render_section_card("Portfolio structure", "How capital is distributed today compared with the strategy you selected.")
     left, right = st.columns(2)
     allocation = calculate_allocation(details)
-    left.plotly_chart(px.pie(allocation, names="category", values="value", hole=.4,
-                              title="Current allocation"), width="stretch", key="dashboard_allocation_chart")
+    left.plotly_chart(create_allocation_chart(allocation), width="stretch", key="dashboard_allocation_chart")
     drift_chart = st.session_state.drift.melt(id_vars="category",
         value_vars=["current_weight", "target_weight"], var_name="Allocation", value_name="Weight %")
-    right.plotly_chart(px.bar(drift_chart, x="category", y="Weight %", color="Allocation",
-                              barmode="group", title="Current vs target"), width="stretch", key="dashboard_target_chart")
-    st.subheader("Highest-priority recommendations")
+    right.plotly_chart(create_current_vs_target_chart(drift_chart), width="stretch", key="dashboard_target_chart")
+    render_section_card("Priority actions", "A first look at what the optimizer considers relevant—not an instruction to trade.")
     order = recommendation_execution_order(st.session_state.recommendations)
-    st.dataframe(order.head(10), width="stretch", hide_index=True)
+    if order.empty:
+        render_empty_state("No actions yet", "Run the full rebalance to create an evidence-backed recommendation set.")
+    else:
+        render_rebalance_summary(order)
+        for _, row in order.head(3).iterrows():
+            render_recommendation_card(row.get("Action"), row.get("Instrument"), row.get("Reason"),
+                                       row.get("Score"), row.get("Data confidence"), isin=row.get("ISIN"),
+                                       quantity=row.get("Quantity"), estimated_value=row.get("Est. value"),
+                                       fee_issue=row.get("Fee issue"))
 
 
 def current_portfolio():
-    st.header("Current Portfolio")
-    st.caption("Portfolio data is stored in Supabase after you click save. No broker connection is used.")
+    render_section_card("Current holdings", "Edit app records, refresh market estimates, or import a portfolio CSV. Saving writes to your private Supabase project.")
     refresh_controls("portfolio_refresh")
     existing = st.session_state.holdings.copy()
     display = existing[[column for column in HOLDING_DISPLAY if column in existing]].rename(columns=HOLDING_DISPLAY)
+    source = existing.get("price_source", pd.Series("Missing", index=existing.index)).fillna("Missing").astype(str)
+    display["Data quality"] = source.apply(
+        lambda value: "● Manual fallback" if "manual" in value.lower() else "● Missing" if "missing" in value.lower() else "● Live")
+    valuation_ready = existing.get("valuation_ready", pd.Series(False, index=existing.index)).fillna(False)
+    recommendation_ready = existing.get("recommendation_ready", pd.Series(False, index=existing.index)).fillna(False)
+    display["Readiness"] = ["● Recommendation ready" if rec else "● Valuation ready" if val else "● Review required"
+                            for val, rec in zip(valuation_ready, recommendation_ready)]
     edited = st.data_editor(display, num_rows="dynamic", width="stretch", hide_index=True,
-        disabled=["Live current price", "Price source", "Current value EUR", "P/L EUR", "P/L %"],
+        disabled=["Live current price", "Price source", "Current value EUR", "P/L EUR", "P/L %", "Data quality", "Readiness"],
         column_config={"Category": st.column_config.SelectboxColumn(options=SUPPORTED_CATEGORIES)}, key="current_editor")
     edited_rows = edited.rename(columns={v: k for k, v in HOLDING_DISPLAY.items()}).to_dict("records")
     old_lookup = {str(row.get("isin")): row for row in existing.to_dict("records")}
@@ -342,15 +351,15 @@ def current_portfolio():
         recompute_models(); st.rerun()
     a, b, c = st.columns(3)
     if a.button("Save portfolio to Supabase"):
-        database.save_holdings(st.session_state.holdings); st.success("Portfolio saved permanently in Supabase.")
+        database.save_holdings(st.session_state.holdings); st.toast("Portfolio saved to Supabase", icon="✓")
     if b.button("Reset sample holdings"):
         st.session_state.holdings = holdings_to_dataframe(SAMPLE_HOLDINGS); recompute_models(); st.rerun()
     c.download_button("Export holdings CSV", display.to_csv(index=False), "holdings_export.csv", "text/csv")
 
 
 def upload_screenshots_page():
-    st.header("Upload Holdings Screenshots")
-    st.info("Screenshots are uploaded to the private Supabase Storage bucket, never to GitHub. They are visual references only; no OCR or broker connection is used.")
+    render_section_card("Upload holdings screenshots")
+    render_alert("Screenshots are uploaded to private Supabase Storage, never GitHub. No broker connection is used.", "info")
     files = st.file_uploader("Choose screenshots", type=["png", "jpg", "jpeg", "webp"],
                              accept_multiple_files=True, key="supabase_screenshots")
     storage = ScreenshotStorage(gateway, user_id)
@@ -358,12 +367,12 @@ def upload_screenshots_page():
         st.image(image, caption=image.name, width=380)
         if st.button(f"Save {image.name} privately", key=f"save_image_{index}_{image.name}"):
             path = storage.upload(image.name, image.getvalue(), image.type or "application/octet-stream")
-            st.success(f"Saved in private Supabase Storage as {path}.")
+            st.toast(f"Saved privately as {path}", icon="✓")
 
 
 def candidate_universe():
-    st.header("Candidate Universe")
-    st.info("The Market Data Engine attempts free enrichment first. Unresolved or conflicting facts move to manual fallback after failed enrichment; incomplete candidates remain blocked from buy/add.")
+    render_section_card("Candidate assets", "Research assets you do not own yet without weakening buy/add readiness rules.")
+    render_alert("The Market Data Engine enriches first. Unresolved or conflicting facts move to manual fallback after enrichment failed; incomplete candidates stay blocked from buy/add.", "info")
     refresh_controls("candidate_refresh")
     scored = st.session_state.scored_candidates
     editable = st.session_state.candidates.copy()
@@ -390,14 +399,14 @@ def candidate_universe():
     a, b, c = st.columns(3)
     if a.button("Save candidate universe to Supabase"):
         database.save_candidates(st.session_state.scored_candidates)
-        st.success("Candidate universe and latest computed scores saved permanently in Supabase.")
+        st.toast("Candidate universe saved to Supabase", icon="✓")
     if b.button("Reset sample candidates"):
         st.session_state.candidates = _normalise_candidates(pd.DataFrame(SAMPLE_CANDIDATES)); recompute_models(); st.rerun()
     c.download_button("Export candidate universe CSV", st.session_state.candidates.to_csv(index=False), "candidate_universe_export.csv", "text/csv")
 
 
 def market_research_dashboard():
-    st.header("Market Research Dashboard")
+    render_section_card("Market research", "Rankings combine momentum, quality, cost, portfolio fit, and risk control.")
     refresh_controls("research_refresh")
     current, candidates = st.session_state.scored_current, st.session_state.scored_candidates
     tables = [
@@ -408,25 +417,26 @@ def market_research_dashboard():
         ("5. Assets to avoid", candidates[candidates["score_band"] == "Avoid / no buy"].sort_values("total_score")),
         ("6. Missing data / enrichment or review required", candidates[candidates["manual_review_required"] == True])]
     for title, frame in tables:
-        st.subheader(title)
+        render_section_card(title)
         columns = [c for c in ["instrument", "category", "trend_status", "momentum_score", "quality_score",
                                "cost_score", "portfolio_fit_score", "total_score", "score_band",
                                "data_confidence", "data_source", "last_updated"] if c in frame]
         st.dataframe(frame[columns], width="stretch", hide_index=True)
     drift_chart = st.session_state.drift.melt(id_vars="category", value_vars=["current_weight", "target_weight"],
                                                var_name="Allocation", value_name="Weight %")
-    st.plotly_chart(px.bar(drift_chart, x="category", y="Weight %", color="Allocation", barmode="group",
-                           title="Current vs target allocation"), width="stretch", key="research_target_chart")
+    st.plotly_chart(create_current_vs_target_chart(drift_chart), width="stretch", key="research_target_chart")
     for score, title in [("total_score", "Candidate universe total score ranking"),
                          ("momentum_score", "Momentum score ranking"), ("quality_score", "Quality score ranking"),
                          ("cost_score", "Cost score ranking")]:
         chart = candidates.nlargest(15, score).sort_values(score)
-        st.plotly_chart(px.bar(chart, x=score, y="instrument", orientation="h", title=title), width="stretch", key=f"research_{score}_chart")
+        figure = style_figure(px.bar(chart, x=score, y="instrument", orientation="h", title=title,
+                                     color_discrete_sequence=["#176B87"]), showlegend=False)
+        st.plotly_chart(figure, width="stretch", key=f"research_{score}_chart")
 
 
 def asset_quality_dashboard():
-    st.header("Asset Quality Dashboard")
-    st.warning("Manual review required means the engine will not recommend a new buy/add. Complete facts from an official factsheet or licensed provider and record the source URL and date.")
+    render_section_card("Asset quality", "Explainable fund, stock, and crypto checks with visible source confidence.")
+    render_alert("Review required means the engine will not recommend a new buy/add. Confirm facts from an official issuer source and retain the URL and date.", "warning")
     combined = pd.concat([st.session_state.scored_current, st.session_state.scored_candidates], ignore_index=True, sort=False)
     columns = [c for c in ["instrument", "asset_type", "category", "ter_pct", "fund_size_eur",
         "replication_method", "distribution_policy", "domicile", "manual_spread_estimate_pct",
@@ -434,60 +444,71 @@ def asset_quality_dashboard():
         "missing_critical_data", "quality_reason", "data_source", "source_url", "last_updated"] if c in combined]
     st.dataframe(combined[columns].sort_values("quality_score", ascending=False), width="stretch", hide_index=True,
                  column_config={"source_url": st.column_config.LinkColumn("Source URL")})
-    st.plotly_chart(px.bar(combined.nlargest(20, "quality_score").sort_values("quality_score"),
-                           x="quality_score", y="instrument", orientation="h", title="Quality score ranking"), width="stretch", key="quality_ranking_chart")
+    quality_figure = style_figure(px.bar(combined.nlargest(20, "quality_score").sort_values("quality_score"),
+                           x="quality_score", y="instrument", orientation="h", title="Quality score ranking",
+                           color_discrete_sequence=["#176B87"]), showlegend=False)
+    st.plotly_chart(quality_figure, width="stretch", key="quality_ranking_chart")
 
 
 def rebalance_engine():
-    st.header("Rebalance Engine")
-    st.warning("Decision support only. No broker connection or orders. Check live Scalable price before every execution.")
+    render_section_card("Immediate recommendations", "Buy, sell, hold, and defer decisions ordered by practical execution priority.")
     recommendations, order = st.session_state.recommendations, recommendation_execution_order(st.session_state.recommendations)
+    if recommendations.empty:
+        render_empty_state("No recommendations", "Run the full rebalance to build the current action set.")
+        return
     if recommendations["Reason"].astype(str).str.contains("insufficient|cash", case=False, regex=True).any():
-        st.warning("Cash shortfall: lower-priority buys were reduced or deferred.")
+        render_alert("Cash shortfall: lower-priority buys were reduced or deferred.", "warning")
     if recommendations["Fee issue"].astype(str).str.contains("Below", case=False).any():
-        st.warning("Fee inefficiency: trades below the configured minimum should normally use a savings plan.")
+        render_alert("Fee inefficiency: trades below the configured minimum should normally use a savings plan.", "warning")
     if recommendations["Purpose"].astype(str).str.contains("Manual review", case=False).any():
-        st.warning("Manual review required: incomplete assets are blocked from buy/add recommendations.")
-    st.subheader("Market-aware recommendations")
-    st.dataframe(recommendations, width="stretch", hide_index=True)
-    st.subheader("Execution order")
-    st.dataframe(order, width="stretch", hide_index=True)
-    st.subheader("Allocation")
-    st.dataframe(allocation_table(st.session_state.drift), width="stretch", hide_index=True)
+        render_alert("Manual review required: incomplete assets remain blocked from buy/add recommendations.", "danger")
+    for _, row in order.head(8).iterrows():
+        render_recommendation_card(row.get("Action"), row.get("Instrument"), row.get("Reason"),
+            row.get("Score"), row.get("Data confidence"), isin=row.get("ISIN"), quantity=row.get("Quantity"),
+            estimated_value=f"€{float(row.get('Est. value') or 0):,.2f}", fee_issue=row.get("Fee issue"))
+    with st.expander("Open complete recommendation table"):
+        st.dataframe(recommendations, width="stretch", hide_index=True)
 
 
 def savings_plan_page():
-    st.header("Savings Plan Optimizer")
-    st.warning("These changes are saved in this app only. You must manually update the actual savings plans in Scalable Capital.")
+    render_section_card("Savings-plan optimizer", "Review contribution changes before creating a manual Scalable checklist.")
+    render_alert("These changes are saved in this app only. You must manually update the actual savings plans in Scalable Capital.", "warning")
     st.session_state.plans = st.data_editor(st.session_state.plans, num_rows="dynamic", width="stretch", hide_index=True,
                                             key="plans_editor")
     recompute_models()
     result = st.session_state.optimized_savings
-    st.metric("Monthly budget", f"€{st.session_state.settings['monthly_savings_budget']:,.2f}")
-    st.dataframe(result, width="stretch", hide_index=True)
+    result = result.copy()
+    if "Priority" not in result: result["Priority"] = range(1, len(result) + 1)
+    if "User approved" not in result: result["User approved"] = False
+    budget_col, quality_col = st.columns(2)
+    with budget_col: render_metric_card("Monthly budget", f"€{st.session_state.settings['monthly_savings_budget']:,.2f}")
+    with quality_col: render_metric_card("Proposed plans", len(result), "Approval required", "warning")
+    result = st.data_editor(result, width="stretch", hide_index=True,
+                            disabled=[column for column in result.columns if column != "User approved"],
+                            key="optimized_plan_approvals")
     budget_check = validate_savings_plan_budget(result, st.session_state.settings["monthly_savings_budget"])
     if not budget_check["valid"]:
-        st.warning(f"Optimizer total differs from the monthly budget by €{budget_check['difference']:+,.2f}.")
+        render_alert(f"Optimizer total differs from the monthly budget by €{budget_check['difference']:+,.2f}.", "warning")
     before = st.session_state.plans[["instrument", "current_plan"]].rename(columns={"instrument": "Instrument", "current_plan": "Amount"})
     before["Plan"] = "Before"
     after = result[["Instrument", "New plan"]].rename(columns={"New plan": "Amount"}); after["Plan"] = "After"
     chart = pd.concat([before, after], ignore_index=True)
-    st.plotly_chart(px.bar(chart, x="Instrument", y="Amount", color="Plan", barmode="group",
-                           title="Savings-plan allocation before vs after"), width="stretch", key="savings_before_after_chart")
+    st.plotly_chart(create_savings_plan_before_after_chart(chart), width="stretch", key="savings_before_after_chart")
     checklist = create_savings_plan_execution_checklist(st.session_state.plans, result)
     a, b, c, d = st.columns(4)
     if a.button("Save savings plans to Supabase"):
         current_lookup = st.session_state.plans.set_index("isin")["current_plan"].to_dict()
         persisted = result.rename(columns={"Instrument": "instrument", "ISIN": "isin",
-            "New plan": "new_plan", "Action": "action", "Reason": "reason", "Score": "score"})
+            "New plan": "new_plan", "Action": "action", "Reason": "reason", "Score": "score",
+            "Priority": "priority", "User approved": "user_approved"})
         persisted["current_plan"] = persisted["isin"].map(current_lookup).fillna(0.0)
         database.save_savings_plans(persisted)
-        st.success("Savings plans and proposed changes saved permanently in Supabase.")
+        st.toast("Savings-plan review saved to Supabase", icon="✓")
     if b.button("Apply optimizer recommendation"):
         applied = normalize_savings_plan_rows(result)
         applied["current_plan"] = applied["new_plan"]
         st.session_state.plans = _plans_with_categories(applied)
-        recompute_models(); st.success("Recommendations applied to app records. Save to persist them.")
+        recompute_models(); st.toast("Optimizer recommendations applied to app records", icon="✓")
     if c.button("Reset to current saved plans"):
         saved = database.load_savings_plans()
         st.session_state.plans = _plans_with_categories(saved if not saved.empty else pd.DataFrame(SAMPLE_SAVINGS_PLANS))
@@ -497,14 +518,14 @@ def savings_plan_page():
 
 
 def recommendation_report_page():
-    st.header("Recommendation Report")
+    render_section_card("Recommendation report", "A source-aware record of portfolio and savings-plan decisions.")
     report = st.session_state.recommendation_report
     st.caption("Every recommendation includes source, timestamp, confidence, reason, and an execution-price warning.")
     st.dataframe(report, width="stretch", hide_index=True)
     a, b = st.columns(2)
     a.download_button("Export recommendation report CSV", report.to_csv(index=False), "recommendation_report.csv", "text/csv")
     if b.button("Save report to Supabase history"):
-        database.save_recommendations(report); st.success("Recommendation report saved permanently in Supabase.")
+        database.save_recommendations(report); st.toast("Recommendation report saved", icon="✓")
 
 
 def _run_data_enrichment(force_web: bool = False, selected_isin: str | None = None,
@@ -571,10 +592,20 @@ def _refresh_news_and_strategy(redesign: bool = False):
 
 
 def screenshot_workflow():
-    st.subheader("Upload Scalable screenshot")
-    st.info("Screenshots are stored privately in Supabase Storage. Paste the visible text for deterministic parsing, then confirm every field before saving.")
+    render_section_card("Guided screenshot import", "A private five-step flow. Images go to Supabase Storage; visible text is parsed only after you paste it.")
+    image_present = st.session_state.get("command_screenshot") is not None
+    draft_present = bool(st.session_state.get("screenshot_draft"))
+    render_flow_steps([
+        {"label": "Upload screenshot", "status": "Done" if image_present else "Running"},
+        {"label": "Preview", "status": "Done" if image_present else "Pending"},
+        {"label": "Paste visible text", "status": "Running" if image_present and not draft_present else "Done" if draft_present else "Pending"},
+        {"label": "Confirm parsed data", "status": "Running" if draft_present else "Pending"},
+        {"label": "Save holding", "status": "Pending"},
+    ])
+    render_alert("Private upload: no broker connection, no automatic screenshot extraction, and no GitHub storage.", "info")
     image = st.file_uploader("Screenshot", type=["png", "jpg", "jpeg", "webp"], key="command_screenshot")
     if image:
+        render_section_card("Screenshot preview")
         st.image(image, caption=image.name, width=420)
     text = st.text_area("Paste visible screenshot text", height=180,
                         placeholder="Instrument, ISIN, WKN, shares, value, buy-in, P/L, sell and buy prices")
@@ -598,7 +629,7 @@ def screenshot_workflow():
         if st.button("Save or update holding by ISIN", type="primary", disabled=not confirmed):
             errors = validate_screenshot_holding(draft)
             if errors:
-                st.error("; ".join(errors))
+                render_alert("; ".join(errors), "danger")
             else:
                 holding = create_holding_from_screenshot_data(draft)
                 if image:
@@ -607,26 +638,52 @@ def screenshot_workflow():
                 rows = update_holding_by_isin(st.session_state.holdings.to_dict("records"), holding)
                 st.session_state.holdings = holdings_to_dataframe(rows)
                 database.save_holdings(st.session_state.holdings)
-                recompute_models(); st.success("Confirmed holding saved to Supabase.")
+                recompute_models(); st.toast("Confirmed holding saved to Supabase", icon="✓")
 
 
 def portfolio_section():
-    st.title("Portfolio Command Center")
-    if st.button("Refresh all prices and metadata", type="primary"):
+    details = st.session_state.valuation_details
+    total = calculate_total_value(details); invested = calculate_total_invested(details)
+    profit = calculate_unrealised_pl(details)
+    cash = float(details.loc[details["category"] == "Cash", "current_value_eur"].sum())
+    history = database.load_snapshots(); gains = calculate_historical_gains(total, history)
+    live = st.session_state.settings.get("live_enabled", True)
+    render_page_header("Portfolio", "A composed view of your wealth, allocation, performance, and data quality.",
+                       "Market data live" if live else "Live data paused")
+    daily = gains.get("daily")
+    render_hero_summary("Total portfolio value", f"€{total:,.2f}",
+                        None if daily is None else f"{daily['pct']:+.2f}% today",
+                        f"Last refreshed {st.session_state.last_price_fetch or 'not yet'} · Estimated valuation")
+    cards = st.columns(7)
+    metrics = [
+        ("Daily", daily), ("Weekly", gains.get("weekly")), ("Monthly", gains.get("monthly")),
+        ("Yearly", gains.get("yearly")),
+    ]
+    for column, (label, gain) in zip(cards[:4], metrics):
+        with column:
+            render_metric_card(label, "—" if gain is None else f"€{gain['eur']:+,.0f}",
+                               "Not enough history" if gain is None else f"{gain['pct']:+.2f}%",
+                               "positive" if gain and gain["eur"] >= 0 else "negative" if gain else "neutral")
+    with cards[4]: render_metric_card("Unrealised P/L", f"€{profit:+,.0f}", f"{profit / invested * 100:+.2f}%" if invested else "—",
+                                      "positive" if profit >= 0 else "negative")
+    with cards[5]: render_metric_card("Cash", f"€{cash:,.0f}", f"{cash / total * 100:.1f}%" if total else "—")
+    fallback_count = int(((details["price_source"] == "Manual fallback") & (details["category"] != "Cash")).sum())
+    with cards[6]: render_metric_card("Data quality", f"{len(details)-fallback_count}/{len(details)} live", f"{fallback_count} fallback", "warning" if fallback_count else "positive")
+    action_left, action_right = st.columns([1, 3])
+    if action_left.button("Refresh all prices and metadata", type="primary", use_container_width=True):
         with st.spinner("Refreshing prices, FX, identifiers, and available metadata..."):
-            refresh_live_data(True)
-            _run_data_enrichment(False)
-        st.rerun()
-    tabs = st.tabs(["Dashboard", "Current holdings", "Holding screenshot upload",
-                    "Live valuation", "Valuation snapshots"])
+            refresh_live_data(True); _run_data_enrichment(False)
+        st.toast("Portfolio market data refreshed", icon="✓"); st.rerun()
+    action_right.caption("Prices are estimates for research. Scalable Capital remains the final execution source.")
+    tabs = st.tabs(["Overview", "Holdings", "Screenshot flow", "Analytics", "Snapshots"])
     with tabs[0]: dashboard()
     with tabs[1]: current_portfolio()
     with tabs[2]: screenshot_workflow()
     with tabs[3]: valuation_dashboard()
     with tabs[4]:
-        history = database.load_snapshots()
-        st.subheader("Valuation snapshots")
-        st.dataframe(history, width="stretch", hide_index=True)
+        render_section_card("Valuation snapshots", "A durable Supabase history used for daily, weekly, monthly, and yearly comparisons.")
+        if history.empty: render_empty_state("No snapshots yet", "Save today’s valuation from Analytics to begin your performance history.")
+        else: st.dataframe(history, width="stretch", hide_index=True)
         st.download_button("Export valuation snapshots CSV", history.to_csv(index=False),
                            "valuation_history.csv", "text/csv")
 
@@ -675,17 +732,30 @@ def _replace_asset(dataset: str, isin: str, updated: dict):
 
 
 def market_data_news_section():
-    st.title("Market Data & News")
-    st.warning("Web-scraped data may be incomplete or outdated. Confirm important data from issuer factsheet before investing.")
+    sentiment_state = st.session_state.sentiment
+    missing_summary = _missing_data_frame()
     engine = MarketDataEngine(st.session_state.settings.get("scraping_enabled", True),
                               st.session_state.settings.get("rate_limit_seconds", .25))
+    provider_rows = st.session_state.provider_status or engine.provider_status_rows(
+        st.session_state.settings.get("news_enabled", True))
+    live_sources = sum(str(row.get("Status")) == "Enabled" for row in provider_rows)
+    render_page_header("Market Data & News", "Live sources, identifier enrichment, repair workflows, and an evidence-ranked financial news feed.",
+                       f"{live_sources} sources active")
+    render_hero_summary("Market regime", sentiment_state.get("market_regime", "Neutral"),
+                        sentiment_state.get("sentiment", "Neutral"),
+                        f"{len(missing_summary)} assets need attention · Last refresh {st.session_state.last_price_fetch or 'not yet'}")
+    render_alert("Web-scraped data may be incomplete or outdated. Confirm important facts from the issuer factsheet before investing.", "warning")
     tabs = st.tabs(["Market Data Engine", "Internet Enrichment Center", "Candidate assets",
                     "Market research", "Asset quality", "Latest market news", "Market sentiment",
                     "Missing Data Repair Center", "Scraping audit"])
     with tabs[0]:
-        st.subheader("Provider status")
-        provider_rows = st.session_state.provider_status or engine.provider_status_rows(
-            st.session_state.settings.get("news_enabled", True))
+        render_section_card("Market Data Engine", "Free/no-key providers are tried first. Optional providers stay quiet when no key exists.")
+        provider_columns = st.columns(4)
+        for index, row in enumerate(provider_rows):
+            with provider_columns[index % 4]:
+                status = row.get("Status", "Unknown")
+                render_metric_card(row.get("Provider"), row.get("Purpose"), status,
+                                   "positive" if status == "Enabled" else "neutral")
         st.dataframe(pd.DataFrame(provider_rows),
                      width="stretch", hide_index=True)
         st.caption("Free/no-key priority: yfinance → OpenFIGI → ECB → optional CoinGecko → safe web enrichment → manual fallback after failed enrichment.")
@@ -713,7 +783,7 @@ def market_data_news_section():
         if c.button("Force enrich all missing ISIN data", type="primary"):
             with st.spinner("Searching and safely scraping ranked public sources..."): _run_data_enrichment(True)
             st.rerun()
-        for warning in st.session_state.enrichment_warnings: st.warning(warning)
+        for warning in st.session_state.enrichment_warnings: render_alert(warning, "warning")
         if st.button("Retry failed enrichment"):
             with st.spinner("Retrying unresolved assets through the full waterfall..."): _run_data_enrichment(True)
             st.rerun()
@@ -724,21 +794,37 @@ def market_data_news_section():
         if st.button("Refresh news"):
             with st.spinner("Fetching public RSS and market headlines..."): _refresh_news_and_strategy(False)
         news = pd.DataFrame(st.session_state.news_items)
-        if news.empty: st.info("No usable public headlines are cached yet.")
+        if news.empty: render_empty_state("No headlines cached", "Refresh the feed to collect legal public RSS and available market headlines.", "Refresh news")
         else:
-            columns = [c for c in ["title", "source", "published_at", "category", "sentiment", "confidence", "url"] if c in news]
-            st.dataframe(news[columns], width="stretch", hide_index=True,
-                         column_config={"url": st.column_config.LinkColumn("Link")})
+            categories = ["All"] + sorted(news.get("category", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+            selected_category = st.selectbox("Filter news by theme", categories, key="news_theme_filter")
+            filtered = news if selected_category == "All" else news[news["category"] == selected_category]
+            render_section_card("Latest market headlines", f"{len(filtered)} evidence items in this view.")
+            for _, item in filtered.head(12).iterrows():
+                render_news_card(item.get("title"), item.get("source"), item.get("published_at"),
+                                 item.get("sentiment"), item.get("url"))
+            with st.expander("Open compact news table"):
+                columns = [c for c in ["title", "source", "published_at", "category", "sentiment", "confidence", "url"] if c in filtered]
+                st.dataframe(filtered[columns], width="stretch", hide_index=True,
+                             column_config={"url": st.column_config.LinkColumn("Link")})
     with tabs[6]:
         sentiment = st.session_state.sentiment
-        st.metric("Market sentiment", sentiment.get("sentiment", "Neutral"))
-        st.metric("Market regime", sentiment.get("market_regime", "Neutral"))
-        st.write(sentiment.get("explanation", "")); st.caption("Confidence: " + sentiment.get("confidence", "Low"))
+        render_hero_summary("Market sentiment", sentiment.get("sentiment", "Neutral"),
+                            sentiment.get("market_regime", "Neutral"), sentiment.get("explanation", ""))
+        render_data_quality_badge(sentiment.get("confidence", "Low") + " confidence")
         if st.button("Use news in strategy refresh"):
-            _refresh_news_and_strategy(True); st.success("Strategy refreshed using the available evidence.")
+            _refresh_news_and_strategy(True); st.toast("Strategy refreshed using current evidence", icon="✓")
     with tabs[7]:
         missing = _missing_data_frame()
-        st.dataframe(missing, width="stretch", hide_index=True)
+        render_section_card("Missing Data Repair Center", "Repair identifiers and fund facts through the full enrichment waterfall before using a manual fallback.")
+        repair_labels = ["Price symbol", "TER/cost", "Category", "Factsheet URL", "Conflicting metadata"]
+        repair_cards = st.columns(5)
+        missing_text = missing.get("Missing / repair needed", pd.Series(dtype=str)).fillna("")
+        for column, label in zip(repair_cards, repair_labels):
+            count = int(missing_text.str.contains(label, case=False, regex=False).sum())
+            with column: render_metric_card(label, count, "Repair now" if count else "Complete", "warning" if count else "positive")
+        if missing.empty: render_empty_state("Data quality looks healthy", "No repair items are currently waiting.")
+        else: st.dataframe(missing, width="stretch", hide_index=True)
         if not missing.empty:
             selected = st.selectbox("Asset to repair", missing["ISIN"].astype(str).tolist(),
                                     format_func=lambda value: missing.loc[missing["ISIN"].astype(str) == value, "Instrument"].iloc[0])
@@ -768,7 +854,7 @@ def market_data_news_section():
                 updated = dict(asset)
                 if field == "ter_pct":
                     try: updated[field] = float(manual_value.replace(",", "."))
-                    except ValueError: st.error("Enter TER as a number, for example 0.20"); st.stop()
+                    except ValueError: render_alert("Enter TER as a number, for example 0.20", "danger"); st.stop()
                 elif field == "scalable_compatible":
                     updated[field] = manual_value.strip().lower() in {"true", "yes", "1", "confirmed"}
                 else: updated[field] = manual_value.strip()
@@ -783,34 +869,52 @@ def market_data_news_section():
 
 
 def strategy_section():
-    st.title("Strategy")
     strategy = st.session_state.strategy
-    st.subheader(strategy.get("strategy_name", "Current strategy"))
-    cards = st.columns(3)
-    cards[0].metric("Market regime", strategy.get("market_regime", "Neutral"))
-    cards[1].metric("Risk profile", strategy.get("risk_profile", "Aggressive"))
-    cards[2].metric("Confidence", strategy.get("confidence", "Low"))
-    st.write(create_strategy_explanation(strategy))
+    render_page_header("Strategy", "Your evidence-gated investment cockpit: allocation intent, market regime, themes, and risk posture.",
+                       strategy.get("confidence", "Low") + " confidence")
+    render_hero_summary("Current strategy", strategy.get("strategy_name", "Strategy not generated"),
+                        strategy.get("market_regime", "Neutral"),
+                        f"Risk profile {strategy.get('risk_profile', 'Aggressive')} · Refreshed {strategy.get('timestamp', 'not yet')}")
+    cards = st.columns(4)
+    with cards[0]: render_metric_card("Market regime", strategy.get("market_regime", "Neutral"), tone="info")
+    with cards[1]: render_metric_card("Risk profile", strategy.get("risk_profile", "Aggressive"))
+    with cards[2]: render_metric_card("Confidence", strategy.get("confidence", "Low"), tone="warning")
+    with cards[3]: render_metric_card("Preferred themes", len(strategy.get("preferred_themes", [])), "Evidence-backed")
+    render_strategy_summary_card(strategy)
+    render_section_card("Strategy reasoning", create_strategy_explanation(strategy))
+    render_section_card("Target allocation", "Current exposure beside the long-term allocation policy.")
+    drift_chart = st.session_state.drift.melt(id_vars="category", value_vars=["current_weight", "target_weight"],
+                                               var_name="Allocation", value_name="Weight %")
+    chart_col, table_col = st.columns([1.45, 1])
+    chart_col.plotly_chart(create_current_vs_target_chart(drift_chart), width="stretch", key="strategy_target_chart")
+    table_col.dataframe(pd.DataFrame(strategy.get("target_allocations", st.session_state.targets).items(),
+                                     columns=["Category", "Target %"]), hide_index=True, width="stretch")
     left, right = st.columns(2)
-    left.write("Preferred themes: " + (", ".join(strategy.get("preferred_themes", [])) or "None confirmed"))
-    right.write("Reduced themes: " + (", ".join(strategy.get("reduced_themes", [])) or "None confirmed"))
-    st.write("Current risks: " + ("; ".join(strategy.get("current_risks", [])) or "No additional evidence-backed risks."))
-    st.write("Savings-plan priorities: " + (", ".join(strategy.get("savings_plan_priorities", [])) or "Follow underweight categories and score quality."))
-    st.write("Rebalance implications: " + "; ".join(strategy.get("rebalance_rules", [])))
-    st.caption("Latest refresh: " + str(strategy.get("timestamp", "Not refreshed")))
-    st.subheader("Target allocation")
-    st.dataframe(pd.DataFrame(strategy.get("target_allocations", st.session_state.targets).items(),
-                              columns=["Category", "Target %"]), hide_index=True, width="stretch")
+    with left:
+        render_section_card("Preferred themes", "Themes supported by current momentum and news evidence.")
+        preferred = strategy.get("preferred_themes", [])
+        if preferred:
+            for theme in preferred: render_status_pill(theme, "success")
+        else: render_empty_state("No preferred theme confirmed", "The engine is deliberately avoiding a weak signal.")
+    with right:
+        render_section_card("Reduced / cautious themes", "Themes that deserve smaller contributions or closer review.")
+        reduced = strategy.get("reduced_themes", [])
+        if reduced:
+            for theme in reduced: render_status_pill(theme, "warning")
+        else: render_empty_state("No reduced theme confirmed", "No evidence-supported reduction is active.")
+    render_alert("Current risks: " + ("; ".join(strategy.get("current_risks", [])) or "No additional evidence-backed risks."), "warning")
+    render_section_card("Savings-plan priorities", ", ".join(strategy.get("savings_plan_priorities", [])) or "Follow underweight categories and quality scores.")
     a, b, c = st.columns(3)
     if a.button("Refresh market news and sentiment"):
-        _refresh_news_and_strategy(False); st.rerun()
+        _refresh_news_and_strategy(False); st.toast("News and sentiment refreshed", icon="✓"); st.rerun()
     if b.button("Redesign strategy using latest market data", type="primary"):
         _refresh_news_and_strategy(True); st.rerun()
     if c.button("Save strategy snapshot"):
-        database.save_strategy_snapshot(strategy); st.success("Strategy snapshot saved to Supabase.")
+        database.save_strategy_snapshot(strategy); st.toast("Strategy snapshot saved", icon="✓")
     history = database.load_strategy_snapshots()
-    st.subheader("Strategy history")
-    st.dataframe(history, width="stretch", hide_index=True)
+    render_section_card("Strategy history", "Saved evidence snapshots create an audit trail without changing broker positions.")
+    if history.empty: render_empty_state("No strategy snapshots", "Save the current strategy when you want a durable checkpoint.")
+    else: st.dataframe(history, width="stretch", hide_index=True)
 
 
 def _save_current_valuation_snapshot():
@@ -830,18 +934,41 @@ def _save_current_valuation_snapshot():
 
 
 def rebalance_section():
-    st.title("Rebalance")
-    st.warning("Decision support only. No broker connection, orders, or savings-plan updates. Check live Scalable price before execution.")
+    render_page_header("Rebalance", "One evidence-led superflow for prices, metadata, news, strategy, allocation, savings plans, and execution planning.",
+                       "Decision support only")
+    render_hero_summary("Full portfolio review", "Run full rebalance", "One guided workflow",
+                        "Refreshes market evidence and produces a manual Scalable execution checklist. It never places an order.")
+    render_alert("No broker connection, orders, or automatic savings-plan updates. Check the live Scalable price before every execution.", "warning")
     st.session_state.market_reasoning_notes = st.text_area(
         "Short market reasoning notes",
         value=st.session_state.get("market_reasoning_notes", ""),
         placeholder="Add your own interpretation, constraints, tax notes, or reasons to defer execution.")
+    flow_labels = ["Refreshing prices", "Enriching missing data", "Reading market news",
+                   "Calculating sentiment", "Refreshing strategy", "Running portfolio optimizer",
+                   "Running savings-plan optimizer", "Building execution checklist", "Saving report"]
+    flow_state = st.session_state.get("rebalance_flow_status", ["Pending"] * len(flow_labels))
+    flow_slot = st.empty()
+    def draw_flow():
+        flow_slot.empty()
+        with flow_slot.container():
+            render_flow_steps([{"label": label, "status": flow_state[index]} for index, label in enumerate(flow_labels)])
+    draw_flow()
     if st.button("Run full rebalance", type="primary", use_container_width=True):
+        flow_state = ["Pending"] * len(flow_labels); st.session_state.rebalance_flow_status = flow_state
         progress = st.progress(0, "Starting Market Data Engine...")
+        flow_map = {"refresh_prices": 0, "enrich_assets": 1, "repair_missing_metadata": 1,
+                    "fetch_news": 2, "calculate_sentiment": 3, "redesign_strategy": 4,
+                    "recalculate_valuation": 5, "recalculate_drift": 5, "score_assets": 5,
+                    "run_portfolio_optimizer": 5, "run_savings_optimizer": 6,
+                    "create_report": 7, "create_execution_checklist": 7, "save_run": 8}
         def progress_step(name, fraction, function):
             def wrapped(results):
+                flow_state[flow_map[name]] = "Running"; draw_flow()
                 progress.progress(fraction, name.replace("_", " ").title())
-                return function(results)
+                try:
+                    result = function(results); flow_state[flow_map[name]] = "Done"; draw_flow(); return result
+                except Exception:
+                    flow_state[flow_map[name]] = "Failed"; draw_flow(); raise
             return wrapped
         steps = {
             "refresh_prices": progress_step("refresh_prices", .06, lambda _: refresh_live_data(True)),
@@ -861,7 +988,11 @@ def rebalance_section():
         }
         run = run_full_rebalance_pipeline(steps)
         st.session_state.last_rebalance_run = run
-        progress.empty(); st.success(run["run_status"])
+        st.session_state.rebalance_flow_status = flow_state
+        progress.empty()
+        if run["warnings"]: render_alert(run["run_status"] + ": " + "; ".join(run["warnings"]), "warning")
+        else: st.toast("Full rebalance completed", icon="✓")
+    render_rebalance_summary(st.session_state.recommendations)
     tabs = st.tabs(["Portfolio recommendations", "Execution order", "Savings plans",
                     "Allocation", "Recommendation report"])
     with tabs[0]: rebalance_engine()
@@ -888,9 +1019,17 @@ def _save_master_run(results):
 
 
 def settings_page():
-    st.header("Settings")
+    render_page_header("Settings", "Tune the experience, strategy guardrails, and Scalable assumptions without touching broker accounts.",
+                       "Private configuration")
     s = st.session_state.settings
-    st.subheader("Market Data Engine")
+    render_section_card("App status", "The switches that determine which evidence systems are active.")
+    status_columns = st.columns(4)
+    status_items = [("Supabase", "Connected", "positive"),
+                    ("Market data", "Enabled" if s.get("live_enabled") else "Paused", "positive" if s.get("live_enabled") else "warning"),
+                    ("Internet enrichment", "Enabled" if s.get("scraping_enabled") else "Paused", "positive" if s.get("scraping_enabled") else "warning"),
+                    ("News", "Enabled" if s.get("news_enabled") else "Paused", "positive" if s.get("news_enabled") else "warning")]
+    for column, (label, value, tone) in zip(status_columns, status_items):
+        with column: render_metric_card(label, value, tone=tone)
     def secret_status(name):
         try:
             return "Configured" if st.secrets.get(name) else "Not configured"
@@ -898,10 +1037,16 @@ def settings_page():
             return "Not configured"
     required = ["SUPABASE_URL", "SUPABASE_ANON_KEY", "APP_PASSWORD"]
     optional = ["OPENFIGI_API_KEY", "COINGECKO_API_KEY", "FMP_API_KEY", "TWELVE_DATA_API_KEY"]
-    st.dataframe(pd.DataFrame(
-        [{"Secret": name, "Required": "Yes", "Status": secret_status(name)} for name in required] +
-        [{"Secret": name, "Required": "No", "Status": secret_status(name)} for name in optional]),
-        width="stretch", hide_index=True)
+    with st.expander("Secrets status"):
+        st.dataframe(pd.DataFrame(
+            [{"Secret": name, "Required": "Yes", "Status": secret_status(name)} for name in required] +
+            [{"Secret": name, "Required": "No", "Status": secret_status(name)} for name in optional]),
+            width="stretch", hide_index=True)
+    render_section_card("Data providers", "Free sources lead the waterfall; paid-key adapters remain optional.")
+    settings_engine = MarketDataEngine(s.get("scraping_enabled", True), s.get("rate_limit_seconds", .25))
+    provider_rows = st.session_state.provider_status or settings_engine.provider_status_rows(s.get("news_enabled", True))
+    st.dataframe(pd.DataFrame(provider_rows), width="stretch", hide_index=True)
+    render_section_card("Strategy settings", "Long-term allocation and risk guardrails used by the optimizer.")
     a, b, c = st.columns(3)
     s["base_currency"] = a.selectbox("Base currency", ["EUR"])
     s["risk_profile"] = b.selectbox("Risk profile", ["Balanced", "Growth", "Aggressive"],
@@ -923,7 +1068,7 @@ def settings_page():
     s["refresh_interval"] = b.selectbox("Data refresh interval", intervals, index=intervals.index(s["refresh_interval"]),
                                         format_func=lambda value: f"{value // 60} minute(s)")
     st.session_state.settings = s
-    st.subheader("Target allocations")
+    render_section_card("Target allocation")
     target_df = pd.DataFrame([{"Category": key, "Target weight %": value} for key, value in st.session_state.targets.items()])
     targets = st.data_editor(target_df, num_rows="dynamic", width="stretch", hide_index=True,
                              column_config={"Category": st.column_config.SelectboxColumn(options=SUPPORTED_CATEGORIES)})
@@ -932,8 +1077,26 @@ def settings_page():
         recompute_models()
         database.save_settings({**st.session_state.settings, "target_allocations": st.session_state.targets})
         total = sum(st.session_state.targets.values())
-        (st.success if abs(total - 100) < .01 else st.warning)(f"Targets total {total:.2f}%.")
-    st.info("Scalable Capital PRIME+: prefer EIX/gettex, avoid Xetra unless needed, use whole units for stocks/ETFs/ETCs/ETPs, and verify all final execution prices manually.")
+        if abs(total - 100) < .01: st.toast("Settings saved", icon="✓")
+        else: render_alert(f"Targets total {total:.2f}%; adjust them to 100%.", "warning")
+    render_section_card("Scalable assumptions", "PRIME+ · Preferred venue EIX/gettex · Avoid Xetra unless needed · €250 direct-trade threshold · €1.98 default below-threshold round trip · Whole units for stocks/ETFs/ETCs/ETPs · Fractional crypto allowed.")
+    render_alert("Final prices, availability, fees, taxes, and savings-plan changes must be checked and applied manually in Scalable Capital.", "info")
+    render_section_card("Danger zone", "Destructive actions require a separate confirmation and never affect your broker account.")
+    danger_a, danger_b, danger_c = st.columns(3)
+    clear_values = danger_a.checkbox("Confirm clear valuation history")
+    if danger_a.button("Clear valuation history", disabled=not clear_values):
+        database.clear_snapshots(); st.toast("Valuation history cleared", icon="✓"); st.rerun()
+    clear_recs = danger_b.checkbox("Confirm clear recommendation history")
+    if danger_b.button("Clear recommendation history", disabled=not clear_recs):
+        database.clear_recommendations(); st.toast("Recommendation history cleared", icon="✓"); st.rerun()
+    reset_demo = danger_c.checkbox("Confirm reset to sample data")
+    if danger_c.button("Reset sample data", disabled=not reset_demo):
+        st.session_state.holdings = holdings_to_dataframe(SAMPLE_HOLDINGS)
+        st.session_state.candidates = _normalise_candidates(pd.DataFrame(SAMPLE_CANDIDATES))
+        st.session_state.plans = _plans_with_categories(pd.DataFrame(SAMPLE_SAVINGS_PLANS))
+        database.save_holdings(st.session_state.holdings); database.save_candidates(st.session_state.candidates)
+        database.save_savings_plans(st.session_state.plans); recompute_models()
+        st.toast("Sample data restored", icon="✓"); st.rerun()
 
 
 user_id = require_authentication()
@@ -944,16 +1107,28 @@ try:
     database = Database(gateway, user_id)
     initialise_state(database)
 except SupabaseConnectionError as exc:
-    st.error(str(exc))
-    st.info("Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit secrets, then run supabase_schema.sql.")
+    render_alert(str(exc), "danger")
+    render_alert("Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit secrets, then run supabase_schema.sql.", "info")
     st.stop()
 
 PAGES = ["Portfolio", "Market Data & News", "Strategy", "Rebalance", "Settings"]
 with st.sidebar:
-    st.title("Financial Command Center")
-    page = st.radio("Navigation", PAGES)
-    st.warning("Decision support only — never connects to Scalable Capital or places orders.")
+    st.markdown('<div class="sidebar-brand"><div class="sidebar-title">Financial Hub</div>'
+                '<div class="sidebar-subtitle">Market-aware wealth manager</div></div>', unsafe_allow_html=True)
+    labels = {"Portfolio": "◫  Portfolio", "Market Data & News": "◉  Market",
+              "Strategy": "◇  Strategy", "Rebalance": "↻  Rebalance", "Settings": "⚙  Settings"}
+    page = st.radio("Navigation", PAGES, format_func=lambda item: labels[item])
+    market_status = "Live" if st.session_state.settings.get("live_enabled", True) else "Paused"
+    refresh_text = str(st.session_state.last_price_fetch or "Not yet")
+    st.markdown(f'<div class="sidebar-status">'
+                f'<div class="sidebar-status-row"><span>Supabase</span><span class="success-pill status-pill">Connected</span></div>'
+                f'<div class="sidebar-status-row"><span>Market data</span><span class="info-pill status-pill">{market_status}</span></div>'
+                f'<div class="sidebar-status-row"><span>Last refresh</span><span>{refresh_text}</span></div></div>',
+                unsafe_allow_html=True)
+    render_alert("Decision support only. No broker connection or auto-trading.", "info")
     logout_button()
 
 {"Portfolio": portfolio_section, "Market Data & News": market_data_news_section,
  "Strategy": strategy_section, "Rebalance": rebalance_section, "Settings": settings_page}[page]()
+st.markdown('<div class="privacy-footer">Private app · Data saved in Supabase · No broker connection · No auto-trading</div>',
+            unsafe_allow_html=True)

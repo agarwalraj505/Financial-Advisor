@@ -166,6 +166,9 @@ class Database:
         return _from_db(self.gateway.select("recommendations", {"user_id": self.user_id},
                                             order="created_at", desc=True), RECOMMENDATION_MAP)
 
+    def clear_recommendations(self) -> None:
+        self.gateway.delete("recommendations", {"user_id": self.user_id})
+
     def load_settings(self) -> dict[str, Any]:
         rows = self.gateway.select("app_settings", {"user_id": self.user_id})
         return {row["setting_key"]: row["setting_value"] for row in rows}

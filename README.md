@@ -4,6 +4,37 @@ A market-data-first Streamlit command center for portfolio valuation, research, 
 
 This is decision support, not financial advice. It never connects to Scalable Capital, places orders, or changes broker savings plans. Internet prices are estimates; check the final live buy/sell price manually in Scalable Capital.
 
+## Premium UI overview
+
+Financial Hub uses an original, Apple-inspired design system without Apple branding or proprietary assets. The interface is intentionally calm and compact: soft surfaces, rounded cards, generous spacing, responsive KPI layouts, consistent Plotly charts, source-confidence badges, guided workflows, and restrained gain/loss colors. The layout adapts its columns for narrower mobile screens.
+
+The presentation layer lives in:
+
+- `styles.py`: design tokens, responsive CSS, sidebar, cards, controls, tables, and optional system dark-mode styling.
+- `ui_components.py`: escaped page headers, hero summaries, metric cards, alerts, badges, news cards, recommendation cards, flow steps, empty states, and chart helpers.
+
+## Navigation guide
+
+The sidebar deliberately exposes only five destinations:
+
+1. **Portfolio** — wealth overview, holdings editor, screenshot flow, analytics, and valuation snapshots.
+2. **Market** — provider health, enrichment, candidate assets, research, repair center, news, and sentiment.
+3. **Strategy** — current strategy, regime, target allocation, themes, risks, and saved snapshots.
+4. **Rebalance** — the full superflow, recommendations, execution order, savings plans, and report.
+5. **Settings** — app status, providers, strategy controls, Scalable assumptions, and confirmed danger-zone actions.
+
+The sidebar also shows Supabase connectivity, live-data status, and the latest refresh time.
+
+## Portfolio workflow
+
+1. Open **Portfolio** and review the hero valuation and performance cards.
+2. Select **Holdings** to edit records, import CSV, refresh prices, and save to Supabase.
+3. Check the Live / Manual fallback / Missing and readiness labels before relying on a value.
+4. Use **Analytics** for value history, allocation, drift, holdings value, and winners/losers.
+5. Save a valuation snapshot to create daily, weekly, monthly, and yearly comparison history.
+
+All valuation and performance figures remain estimates until confirmed against Scalable Capital.
+
 ## 1. Market Data Engine
 
 The app enriches every holding and candidate through a free-data waterfall:
