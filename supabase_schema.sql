@@ -61,12 +61,105 @@ create table if not exists public.app_settings (
   updated_at timestamptz not null default now(), unique (user_id, setting_key)
 );
 
+-- Additive migrations make this script safe to rerun for an existing deployment.
+alter table public.holdings
+  add column if not exists valuation_ready boolean default false,
+  add column if not exists recommendation_ready boolean default false,
+  add column if not exists valuation_review_reasons text,
+  add column if not exists recommendation_review_reasons text,
+  add column if not exists provider_status jsonb,
+  add column if not exists enrichment_audit jsonb,
+  add column if not exists web_scrape_status text,
+  add column if not exists web_scrape_last_run timestamptz,
+  add column if not exists web_scrape_sources jsonb,
+  add column if not exists web_scrape_confidence text,
+  add column if not exists factsheet_url text,
+  add column if not exists kid_url text,
+  add column if not exists issuer text,
+  add column if not exists metadata_conflicts jsonb,
+  add column if not exists enrichment_suggestions jsonb,
+  add column if not exists confirmed_by_user boolean default false,
+  add column if not exists suggested_price_symbols jsonb,
+  add column if not exists suggested_asset_type text,
+  add column if not exists suggested_category text,
+  add column if not exists manual_review_attempted boolean default false,
+  add column if not exists last_auto_repair_at timestamptz,
+  add column if not exists wkn text,
+  add column if not exists current_price_eur numeric,
+  add column if not exists buy_in_price_eur numeric,
+  add column if not exists sell_price_eur numeric,
+  add column if not exists buy_price_eur numeric,
+  add column if not exists spread_eur numeric,
+  add column if not exists spread_percent numeric,
+  add column if not exists screenshot_path text,
+  add column if not exists screenshot_captured_at timestamptz,
+  add column if not exists source text,
+  add column if not exists user_confirmed boolean default false;
+
+alter table public.candidate_assets
+  add column if not exists valuation_ready boolean default false,
+  add column if not exists recommendation_ready boolean default false,
+  add column if not exists valuation_review_reasons text,
+  add column if not exists recommendation_review_reasons text,
+  add column if not exists provider_status jsonb,
+  add column if not exists enrichment_audit jsonb,
+  add column if not exists web_scrape_status text,
+  add column if not exists web_scrape_last_run timestamptz,
+  add column if not exists web_scrape_sources jsonb,
+  add column if not exists web_scrape_confidence text,
+  add column if not exists factsheet_url text,
+  add column if not exists kid_url text,
+  add column if not exists issuer text,
+  add column if not exists metadata_conflicts jsonb,
+  add column if not exists enrichment_suggestions jsonb,
+  add column if not exists confirmed_by_user boolean default false,
+  add column if not exists suggested_price_symbols jsonb,
+  add column if not exists suggested_asset_type text,
+  add column if not exists suggested_category text,
+  add column if not exists manual_review_attempted boolean default false,
+  add column if not exists last_auto_repair_at timestamptz;
+
+alter table public.savings_plans
+  add column if not exists category text,
+  add column if not exists priority integer,
+  add column if not exists user_approved boolean default false,
+  add column if not exists last_updated timestamptz default now();
+
+create table if not exists public.market_news (
+  id uuid primary key default gen_random_uuid(), user_id text not null, title text, url text,
+  source text, published_at timestamptz, summary text, category text, related_symbols jsonb,
+  related_themes jsonb, sentiment text, sentiment_score numeric, confidence text,
+  fetched_at timestamptz default now()
+);
+
+create table if not exists public.strategy_snapshots (
+  id uuid primary key default gen_random_uuid(), user_id text not null,
+  created_at timestamptz default now(), strategy_name text, market_regime text, risk_profile text,
+  target_allocations jsonb, preferred_themes jsonb, reduced_themes jsonb,
+  savings_plan_priorities jsonb, rebalance_rules jsonb, current_risks jsonb,
+  overweight_underweight_plan text, reasoning text, confidence text
+);
+
+alter table public.strategy_snapshots
+  add column if not exists current_risks jsonb,
+  add column if not exists overweight_underweight_plan text;
+
+create table if not exists public.rebalance_runs (
+  id uuid primary key default gen_random_uuid(), user_id text not null,
+  created_at timestamptz default now(), run_status text, strategy_snapshot jsonb,
+  valuation_snapshot jsonb, recommendations jsonb, savings_plan_changes jsonb,
+  news_inputs jsonb, sentiment_summary jsonb, warnings jsonb
+);
+
 create index if not exists holdings_user_idx on public.holdings(user_id);
 create index if not exists candidates_user_idx on public.candidate_assets(user_id);
 create index if not exists savings_user_idx on public.savings_plans(user_id);
 create index if not exists snapshots_user_date_idx on public.valuation_snapshots(user_id, snapshot_date);
 create index if not exists recommendations_user_idx on public.recommendations(user_id, created_at desc);
 create index if not exists app_settings_user_idx on public.app_settings(user_id);
+create index if not exists market_news_user_time_idx on public.market_news(user_id, published_at desc);
+create index if not exists strategy_user_time_idx on public.strategy_snapshots(user_id, created_at desc);
+create index if not exists rebalance_user_time_idx on public.rebalance_runs(user_id, created_at desc);
 
 alter table public.holdings enable row level security;
 alter table public.candidate_assets enable row level security;
@@ -74,6 +167,9 @@ alter table public.savings_plans enable row level security;
 alter table public.valuation_snapshots enable row level security;
 alter table public.recommendations enable row level security;
 alter table public.app_settings enable row level security;
+alter table public.market_news enable row level security;
+alter table public.strategy_snapshots enable row level security;
+alter table public.rebalance_runs enable row level security;
 
 create or replace function public.request_user_id()
 returns text language sql stable as $$
@@ -84,7 +180,7 @@ do $$
 declare table_name text;
 begin
   foreach table_name in array array['holdings','candidate_assets','savings_plans',
-    'valuation_snapshots','recommendations','app_settings']
+    'valuation_snapshots','recommendations','app_settings','market_news','strategy_snapshots','rebalance_runs']
   loop
     execute format('drop policy if exists streamlit_mvp_access on public.%I', table_name);
     execute format(

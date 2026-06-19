@@ -101,7 +101,7 @@ def score_assets(assets: pd.DataFrame, research: pd.DataFrame, drift: pd.DataFra
             category_counts = settings.get("current_category_counts", {})
             row["overlap_score"] = min(10, _number(category_counts.get(str(row.get("category", ""))), 0) * 2)
         metrics = research_lookup.get(str(row.get("price_symbol", "")), {})
-        quality = calculate_asset_quality(row, metrics)
+        quality = calculate_asset_quality(row, metrics, is_candidate=not is_current)
         current_value = _number(row.get("current_value_eur"), 0)
         projected_weight = current_value / total_portfolio * 100 if total_portfolio else 0
         momentum = _number(metrics.get("momentum_score"), 0)
@@ -111,8 +111,9 @@ def score_assets(assets: pd.DataFrame, research: pd.DataFrame, drift: pd.DataFra
         risk = calculate_risk_control_score(row, metrics, str(settings.get("risk_profile", "Aggressive")),
                                             _number(settings.get("max_crypto_weight"), 5))
         total = calculate_total_score(momentum, quality["quality_score"], cost, fit, risk)
-        if quality["manual_review_required"]:
-            band = "Manual review required"
+        if not quality["recommendation_ready"]:
+            band = ("Manual review required before buy/add" if bool(row.get("manual_review_attempted", False))
+                    else "Data enrichment required before buy/add")
         elif total >= 8:
             band = "Eligible for buy/add"
         elif total >= 6.5:
@@ -126,7 +127,7 @@ def score_assets(assets: pd.DataFrame, research: pd.DataFrame, drift: pd.DataFra
         row.update({"momentum_score": round(momentum, 2), "cost_score": cost,
                     "portfolio_fit_score": fit, "risk_control_score": risk, "total_score": total,
                     "score_band": band, "data_confidence": confidence, "is_current_holding": is_current,
-                    "data_source": metrics.get("data_source") or row.get("data_source") or "Manual review required",
+                    "data_source": metrics.get("data_source") or row.get("data_source") or "Data enrichment pending",
                     "last_updated": metrics.get("last_updated") or row.get("last_updated") or ""})
         rows.append(row)
     return pd.DataFrame(rows)

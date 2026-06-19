@@ -36,7 +36,45 @@ def critical_missing_fields(asset: dict | pd.Series) -> list[str]:
     return missing
 
 
-def calculate_asset_quality(asset: dict | pd.Series, market_metrics: dict | None = None) -> dict:
+def assess_asset_readiness(asset: dict | pd.Series, is_candidate: bool = False) -> dict:
+    """Separate valuation readiness from buy/add recommendation readiness."""
+    quantity = _number(asset.get("quantity"), 1 if is_candidate else 0) or 0
+    price = (_number(asset.get("live_current_price"), 0) or _number(asset.get("latest_price"), 0)
+             or _number(asset.get("manual_current_price"), 0) or _number(asset.get("current_price_eur"), 0))
+    currency = str(asset.get("currency", "") or "").upper()
+    fx = _number(asset.get("fx_rate_to_eur"), 1 if currency == "EUR" else 0) or 0
+    valuation_reasons = []
+    if not is_candidate and quantity <= 0: valuation_reasons.append("Quantity missing")
+    if not price: valuation_reasons.append("Live and manual price missing")
+    if not currency: valuation_reasons.append("Currency missing")
+    elif currency != "EUR" and fx <= 0: valuation_reasons.append("FX rate to EUR missing")
+    valuation_ready = not valuation_reasons
+
+    recommendation_reasons = list(valuation_reasons)
+    asset_type = str(asset.get("asset_type", "") or "")
+    if not str(asset.get("category", "") or "").strip(): recommendation_reasons.append("Category missing")
+    if not asset_type.strip(): recommendation_reasons.append("Asset type missing")
+    if is_candidate and not bool(asset.get("scalable_compatible", False)):
+        recommendation_reasons.append("Scalable compatibility not confirmed")
+    if asset_type in FUND_TYPES:
+        ter = _number(asset.get("ter_pct")) or _number(asset.get("ter_percent"))
+        notes = str(asset.get("notes", "") or "").lower()
+        suggestion = (asset.get("enrichment_suggestions") or {}).get("ter_pct", {}) if isinstance(asset.get("enrichment_suggestions"), dict) else {}
+        verified_suggestion = suggestion.get("value") is not None and suggestion.get("confidence") == "High"
+        if ter is None and not verified_suggestion and not any(word in notes for word in ("verified cost", "verified ter")):
+            recommendation_reasons.append("Quality review required: TER/cost missing")
+    source = str(asset.get("data_source", "") or asset.get("provider", "") or "")
+    confidence = str(asset.get("data_confidence", "") or asset.get("web_scrape_confidence", "") or "")
+    if not source: recommendation_reasons.append("Data source missing")
+    if not confidence: recommendation_reasons.append("Data confidence missing")
+    recommendation_ready = valuation_ready and not recommendation_reasons
+    return {"valuation_ready": valuation_ready, "recommendation_ready": recommendation_ready,
+            "valuation_review_reasons": "; ".join(valuation_reasons),
+            "recommendation_review_reasons": "; ".join(dict.fromkeys(recommendation_reasons))}
+
+
+def calculate_asset_quality(asset: dict | pd.Series, market_metrics: dict | None = None,
+                            is_candidate: bool = False) -> dict:
     market_metrics = market_metrics or {}
     asset_type = str(asset.get("asset_type", ""))
     reasons, values = [], []
@@ -91,10 +129,19 @@ def calculate_asset_quality(asset: dict | pd.Series, market_metrics: dict | None
     overlap = _number(asset.get("overlap_score"), 0) or 0
     score = sum(values) / len(values) if values else 0.0
     score = max(0, score - max(0, overlap - 5) * .35)
+    readiness = assess_asset_readiness(asset, is_candidate)
     missing = critical_missing_fields(asset)
     confidence = "High" if not missing and len(values) >= 4 else "Medium" if not missing else "Low"
     if missing:
-        reasons.append("Manual review required: " + ", ".join(missing))
+        prefix = "Manual review required" if bool(asset.get("manual_review_attempted", False)) else "Data enrichment required"
+        reasons.append(prefix + ": " + ", ".join(missing))
+    has_valuation_context = any(key in asset for key in (
+        "quantity", "live_current_price", "latest_price", "manual_current_price", "current_price_eur"
+    ))
     return {"quality_score": round(score, 2), "quality_confidence": confidence,
-            "manual_review_required": bool(missing), "missing_critical_data": ", ".join(missing),
-            "quality_reason": "; ".join(reasons) if reasons else "Manual review required."}
+            # A standalone quality calculation may not yet contain valuation fields.
+            # Operational scoring still uses recommendation_ready below.
+            "manual_review_required": (not readiness["recommendation_ready"] if has_valuation_context else bool(missing)),
+            "missing_critical_data": readiness["recommendation_review_reasons"],
+            "quality_reason": "; ".join(reasons) if reasons else "Indicative quality score; confirm metadata.",
+            **readiness}

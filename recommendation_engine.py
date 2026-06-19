@@ -24,7 +24,11 @@ def build_recommendation_report(rebalance: pd.DataFrame, savings: pd.DataFrame) 
                              "ISIN": row["ISIN"], "Ticker/ID": "", "Quantity": 0,
                              "Est. value": row["New plan"], "Fee issue": "Savings-plan execution; verify eligibility",
                              "Score": row["Score"], "Data confidence": "Low",
-                             "Reason": row["Reason"], "Data source": "Manual portfolio + scored universe",
+                             "Reason": row["Reason"], "Price source": "Not applicable to savings plan",
+                             "Metadata source": "Saved portfolio and scored candidate universe",
+                             "News/sentiment input": "See latest strategy snapshot", "Last updated": generated_at,
+                             "Scalable execution warning": "Check availability and update manually in Scalable Capital",
+                             "Data source": "Saved portfolio and scored candidate universe",
                              "Timestamp": generated_at, "Execution note": "Check live Scalable availability before execution"})
     savings_frame = pd.DataFrame(savings_rows)
     return pd.concat([trade, savings_frame], ignore_index=True, sort=False)

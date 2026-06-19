@@ -13,7 +13,12 @@ CANDIDATE_COLUMNS = ["instrument", "isin", "ticker_id", "price_symbol", "asset_t
     "fractional_allowed", "scalable_compatible", "preferred_venue", "manual_spread_estimate_pct",
     "liquidity_score", "quality_score", "momentum_score", "valuation_score", "cost_score",
     "portfolio_fit_score", "risk_control_score", "total_score", "data_source", "source_url",
-    "data_confidence", "last_updated", "notes"]
+    "data_confidence", "last_updated", "notes", "valuation_ready", "recommendation_ready",
+    "valuation_review_reasons", "recommendation_review_reasons", "provider_status", "enrichment_audit",
+    "web_scrape_status", "web_scrape_last_run", "web_scrape_sources", "web_scrape_confidence",
+    "factsheet_url", "kid_url", "issuer", "metadata_conflicts", "enrichment_suggestions",
+    "confirmed_by_user", "suggested_price_symbols", "suggested_asset_type", "suggested_category",
+    "manual_review_attempted", "last_auto_repair_at"]
 
 
 def holding(instrument, isin, ticker, symbol, asset_type, category, quantity, value, buy_in, fractional=False):
@@ -48,7 +53,7 @@ def candidate(instrument, isin, ticker, symbol, asset_type, category, theme, reg
                 "fractional_allowed": asset_type == "Crypto", "scalable_compatible": False,
                 "preferred_venue": "EIX/gettex", "data_source": "Yahoo symbol sample; quality facts unverified",
                 "source_url": f"https://finance.yahoo.com/quote/{symbol}" if symbol else "",
-                "last_updated": "", "notes": "Manual review required before recommendation."})
+                "last_updated": "", "notes": "Data enrichment required before recommendation."})
     return row
 
 

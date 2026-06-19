@@ -15,6 +15,10 @@ from supabase_client import SupabaseGateway, get_supabase_client
 def clean_value(value):
     if value is None or (not isinstance(value, (dict, list)) and pd.isna(value)):
         return None
+    if isinstance(value, dict):
+        return {str(key): clean_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [clean_value(item) for item in value]
     if hasattr(value, "item"):
         value = value.item()
     if isinstance(value, (datetime, date)):
@@ -28,7 +32,9 @@ def _payload(row: dict | pd.Series, mapping: dict[str, str], user_id: str) -> di
     for app_name, db_name in mapping.items():
         if app_name in source:
             value = clean_value(source[app_name])
-            if db_name in {"last_updated", "inception_date", "timestamp", "snapshot_date"} and value == "":
+            if (db_name in {"last_updated", "inception_date", "timestamp", "snapshot_date",
+                            "web_scrape_last_run", "last_auto_repair_at", "screenshot_captured_at"}
+                    and value == ""):
                 value = None
             result[db_name] = value
     return result
@@ -41,7 +47,11 @@ HOLDING_MAP = {"instrument": "instrument", "isin": "isin", "ticker_id": "ticker_
     "price_source": "price_source", "fx_rate_to_eur": "fx_rate_to_eur",
     "current_value_eur": "current_value_eur", "buy_in_value_eur": "buy_in_value_eur",
     "pl_eur": "pl_eur", "pl_pct": "pl_percent", "direct_trading_allowed": "direct_trading_allowed",
-    "fractional_allowed": "fractional_allowed", "notes": "notes"}
+    "fractional_allowed": "fractional_allowed", "notes": "notes", "wkn": "wkn",
+    "current_price_eur": "current_price_eur", "buy_in_price_eur": "buy_in_price_eur",
+    "sell_price_eur": "sell_price_eur", "buy_price_eur": "buy_price_eur", "spread_eur": "spread_eur",
+    "spread_percent": "spread_percent", "screenshot_path": "screenshot_path",
+    "screenshot_captured_at": "screenshot_captured_at", "source": "source", "user_confirmed": "user_confirmed"}
 
 CANDIDATE_MAP = {"instrument": "instrument", "isin": "isin", "ticker_id": "ticker_id",
     "price_symbol": "price_symbol", "asset_type": "asset_type", "category": "category", "theme": "theme",
@@ -57,8 +67,22 @@ CANDIDATE_MAP = {"instrument": "instrument", "isin": "isin", "ticker_id": "ticke
     "source_url": "source_url", "data_confidence": "data_confidence", "last_updated": "last_updated",
     "notes": "notes"}
 
-SAVINGS_MAP = {"instrument": "instrument", "isin": "isin", "current_plan": "current_plan_eur",
-               "new_plan": "new_plan_eur", "action": "action", "reason": "reason", "score": "score"}
+ENRICHMENT_MAP = {"valuation_ready": "valuation_ready", "recommendation_ready": "recommendation_ready",
+    "valuation_review_reasons": "valuation_review_reasons", "recommendation_review_reasons": "recommendation_review_reasons",
+    "provider_status": "provider_status", "enrichment_audit": "enrichment_audit", "web_scrape_status": "web_scrape_status",
+    "web_scrape_last_run": "web_scrape_last_run", "web_scrape_sources": "web_scrape_sources",
+    "web_scrape_confidence": "web_scrape_confidence", "factsheet_url": "factsheet_url", "kid_url": "kid_url",
+    "issuer": "issuer", "metadata_conflicts": "metadata_conflicts", "enrichment_suggestions": "enrichment_suggestions",
+    "confirmed_by_user": "confirmed_by_user", "suggested_price_symbols": "suggested_price_symbols",
+    "suggested_asset_type": "suggested_asset_type", "suggested_category": "suggested_category",
+    "manual_review_attempted": "manual_review_attempted", "last_auto_repair_at": "last_auto_repair_at"}
+HOLDING_MAP.update(ENRICHMENT_MAP)
+CANDIDATE_MAP.update(ENRICHMENT_MAP)
+
+SAVINGS_MAP = {"instrument": "instrument", "isin": "isin", "category": "category",
+               "current_plan": "current_plan_eur", "new_plan": "new_plan_eur", "action": "action",
+               "priority": "priority", "reason": "reason", "score": "score", "user_approved": "user_approved",
+               "last_updated": "last_updated"}
 
 SNAPSHOT_MAP = {"date": "snapshot_date", "timestamp": "timestamp", "total_value_eur": "total_value_eur",
     "cash_eur": "cash_eur", "invested_value_eur": "invested_value_eur", "unrealized_pl_eur": "unrealized_pl_eur",
@@ -151,6 +175,47 @@ class Database:
         rows = [{"user_id": self.user_id, "setting_key": key, "setting_value": clean_value(value),
                  "updated_at": now} for key, value in settings.items()]
         self.gateway.upsert("app_settings", rows, on_conflict="user_id,setting_key")
+
+    def save_news(self, items: list[dict]) -> None:
+        if not items:
+            return
+        allowed = {"title", "url", "source", "published_at", "summary", "category",
+                   "related_symbols", "related_themes", "sentiment", "confidence", "fetched_at"}
+        rows = []
+        for item in items:
+            row = {key: clean_value(value) for key, value in item.items() if key in allowed}
+            row["sentiment_score"] = clean_value(item.get("score"))
+            row["user_id"] = self.user_id
+            if not row.get("published_at"): row["published_at"] = None
+            rows.append(row)
+        self.gateway.insert("market_news", rows)
+
+    def load_news(self) -> pd.DataFrame:
+        return pd.DataFrame(self.gateway.select("market_news", {"user_id": self.user_id},
+                                                order="published_at", desc=True))
+
+    def save_strategy_snapshot(self, strategy: dict) -> None:
+        allowed = {"strategy_name", "market_regime", "risk_profile", "target_allocations",
+                   "preferred_themes", "reduced_themes", "savings_plan_priorities", "rebalance_rules",
+                   "current_risks", "overweight_underweight_plan", "reasoning", "confidence"}
+        payload = {key: clean_value(value) for key, value in strategy.items() if key in allowed}
+        payload["user_id"] = self.user_id
+        self.gateway.insert("strategy_snapshots", payload)
+
+    def load_strategy_snapshots(self) -> pd.DataFrame:
+        return pd.DataFrame(self.gateway.select("strategy_snapshots", {"user_id": self.user_id},
+                                                order="created_at", desc=True))
+
+    def save_rebalance_run(self, run: dict) -> None:
+        allowed = {"run_status", "strategy_snapshot", "valuation_snapshot", "recommendations",
+                   "savings_plan_changes", "news_inputs", "sentiment_summary", "warnings"}
+        payload = {key: clean_value(value) for key, value in run.items() if key in allowed}
+        payload["user_id"] = self.user_id
+        self.gateway.insert("rebalance_runs", payload)
+
+    def load_rebalance_runs(self) -> pd.DataFrame:
+        return pd.DataFrame(self.gateway.select("rebalance_runs", {"user_id": self.user_id},
+                                                order="created_at", desc=True))
 
 
 # Beginner-friendly module-level helpers requested by the Streamlit app contract.

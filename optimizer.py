@@ -11,7 +11,8 @@ from scoring import allocation_bucket
 
 OUTPUT_COLUMNS = ["Action", "Purpose", "Instrument", "ISIN", "Ticker/ID", "Quantity",
                   "Est. value", "Fee issue", "Score", "Data confidence", "Reason",
-                  "Data source", "Timestamp", "Execution note"]
+                  "Price source", "Metadata source", "News/sentiment input", "Last updated",
+                  "Scalable execution warning", "Data source", "Timestamp", "Execution note"]
 
 
 def _number(value, default=0.0):
@@ -35,7 +36,12 @@ def _row(action: str, purpose: str, asset: pd.Series, quantity: float, value: fl
             "Fee issue": _fee_issue(value, settings["direct_trade_minimum"], settings["small_trade_round_trip_fee"]),
             "Score": round(_number(asset.get("total_score")), 2),
             "Data confidence": asset.get("data_confidence", "Low"), "Reason": reason,
-            "Data source": asset.get("data_source") or "Manual input / review required",
+            "Price source": asset.get("price_source") or asset.get("data_source") or "Manual fallback after failed enrichment",
+            "Metadata source": asset.get("source_url") or asset.get("issuer") or asset.get("data_source") or "Pending confirmation",
+            "News/sentiment input": settings.get("news_sentiment", "Neutral / no material evidence"),
+            "Last updated": asset.get("last_updated") or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "Scalable execution warning": "Check live Scalable price before execution",
+            "Data source": asset.get("data_source") or "Manual fallback after failed enrichment",
             "Timestamp": asset.get("last_updated") or datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "Execution note": "Check live Scalable price before execution"}
 
@@ -45,7 +51,8 @@ def generate_market_aware_recommendations(current: pd.DataFrame, candidates: pd.
     """Recommend sells/holds first, then cash-limited adds and new buys."""
     minimum = float(settings.get("direct_trade_minimum", 250))
     configured = {"direct_trade_minimum": minimum,
-                  "small_trade_round_trip_fee": float(settings.get("small_trade_round_trip_fee", 1.98))}
+                  "small_trade_round_trip_fee": float(settings.get("small_trade_round_trip_fee", 1.98)),
+                  "news_sentiment": settings.get("news_sentiment", "Neutral / no material evidence")}
     drift_lookup = drift.set_index("category").to_dict("index") if not drift.empty else {}
     cash = float(settings.get("available_cash_eur", 0))
     rows, owned_isins = [], set(current.get("isin", pd.Series(dtype=str)).astype(str))
@@ -58,7 +65,8 @@ def generate_market_aware_recommendations(current: pd.DataFrame, candidates: pd.
         drift_eur, status = _number(category_data.get("drift_eur")), category_data.get("status", "On target")
         value, quantity = _number(asset.get("current_value_eur")), _number(asset.get("quantity"))
         price = value / quantity if quantity else 0
-        if status == "Overweight" and score < 6.5 and value > 0 and not bool(asset.get("manual_review_required", False)):
+        ready = bool(asset.get("recommendation_ready", not bool(asset.get("manual_review_required", False))))
+        if status == "Overweight" and score < 6.5 and value > 0 and ready:
             sell_value = min(value, max(abs(drift_eur), minimum))
             sell_qty = sell_value / price if bool(asset.get("fractional_allowed", False)) and price else floor(sell_value / price) if price else 0
             sell_value = sell_qty * price
@@ -71,8 +79,9 @@ def generate_market_aware_recommendations(current: pd.DataFrame, candidates: pd.
                              "Strong setup, but compare with higher-scoring candidates before adding.", configured))
         else:
             reason = "No clearly superior risk/reward setup justifies a forced trade."
-            if bool(asset.get("manual_review_required", False)):
-                reason += " Quality data needs manual review."
+            if not ready:
+                reason = "Hold, but complete cost review; manual review remains required. " + str(
+                    asset.get("recommendation_review_reasons", "Metadata needs review."))
             rows.append(_row("Hold", "Maintain current position", asset, 0, 0, reason, configured))
 
     eligible = candidates.sort_values("total_score", ascending=False) if not candidates.empty else candidates
@@ -82,10 +91,13 @@ def generate_market_aware_recommendations(current: pd.DataFrame, candidates: pd.
         category_data = drift_lookup.get(allocation_bucket(str(asset.get("category", ""))), {})
         underweight = category_data.get("status") == "Underweight"
         score = _number(asset.get("total_score"))
-        critical = bool(asset.get("manual_review_required", False))
+        critical = not bool(asset.get("recommendation_ready", not bool(asset.get("manual_review_required", False))))
         if critical:
-            rows.append(_row("No trade", "Manual review required", asset, 0, 0,
-                             "Critical data is missing; this asset can only remain on the watchlist.", configured))
+            attempted = bool(asset.get("manual_review_attempted", False))
+            purpose = "Manual review required" if attempted else "Data enrichment required"
+            reason = ("All enabled enrichment routes were attempted; unresolved critical data keeps this asset on the watchlist."
+                      if attempted else "Run the Market Data Engine before considering this candidate for buy/add.")
+            rows.append(_row("No trade", purpose, asset, 0, 0, reason, configured))
             continue
         scalable = bool(asset.get("scalable_compatible", False))
         direct_available = bool(asset.get("direct_trading_available", False))

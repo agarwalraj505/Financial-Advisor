@@ -1,184 +1,124 @@
 # Financial Advisor / Wealth Portfolio Rebalancer
 
-A production-style Streamlit web app for portfolio valuation, market research, candidate selection, rebalancing, and savings-plan optimization. It is designed for deployment from a private GitHub repository to Streamlit Community Cloud with permanent Supabase persistence.
+A market-data-first Streamlit command center for portfolio valuation, research, strategy design, rebalancing, and savings-plan planning. It deploys from GitHub to Streamlit Community Cloud and stores private app data in Supabase.
 
-This is decision support, not financial advice. The app never connects to Scalable Capital, never auto-trades, and never places orders. Internet prices are estimates; always check the final live price manually in Scalable Capital.
+This is decision support, not financial advice. It never connects to Scalable Capital, places orders, or changes broker savings plans. Internet prices are estimates; check the final live buy/sell price manually in Scalable Capital.
 
-## Architecture
+## 1. Market Data Engine
 
-- Streamlit Community Cloud: online app hosting
-- GitHub: source code only
-- Supabase Postgres: holdings, candidates, plans, snapshots, recommendations, and settings
-- yfinance: stocks, ETFs, ETCs, ETPs, price history, and FX
-- CoinGecko: optional/public crypto prices
-- Manual prices: reliable fallback when free APIs fail
-- `st.secrets`: credentials and password gate
+The app enriches every holding and candidate through a free-data waterfall:
 
-Production data is not stored in local JSON or CSV. CSV is used only for browser import/export.
+1. Preserve user-entered facts.
+2. Map ISINs with unauthenticated OpenFIGI.
+3. Search and test yfinance symbols.
+4. Fetch prices, history, currency, and available fund metadata from yfinance.
+5. Convert currencies using the ECB Data Portal, then yfinance FX as fallback.
+6. Try yfinance crypto symbols and optional public CoinGecko.
+7. Search public web sources for unresolved metadata.
+8. Safely scrape source-ranked, robots-permitted pages.
+9. Request manual fallback after failed enrichment.
 
-## Deploy online
+User-entered values are never silently overwritten. Conflicts are stored as suggestions with source, timestamp, method, and confidence.
 
-### 1. Create and push the GitHub repository
+## 2. No paid API key mode
 
-Create a private GitHub repository. From this project folder:
-
-```powershell
-git status
-git add .
-git commit -m "Deploy Financial Advisor app"
-git branch -M main
-git remote add origin https://github.com/YOUR-NAME/YOUR-PRIVATE-REPO.git
-git push -u origin main
-```
-
-Confirm that `.env`, `.streamlit/secrets.toml`, `data/`, uploads, personal CSVs, and cache folders are not staged.
-
-### 2. Create a Supabase project
-
-Create a project at [supabase.com](https://supabase.com). Choose an appropriate EU region and a strong database password.
-
-### 3. Run the SQL schema
-
-Open **Supabase → SQL Editor**, paste the entire contents of `supabase_schema.sql`, and run it once. It creates:
-
-- `holdings`
-- `candidate_assets`
-- `savings_plans`
-- `valuation_snapshots`
-- `recommendations`
-- `app_settings`
-- indexes and MVP row-level security policies
-
-The MVP uses `user_id = "default_user"` after successful Streamlit password login. Upgrade to Supabase Auth and `auth.uid()` policies before supporting multiple independent users.
-
-### 4. Create the Streamlit Community Cloud app
-
-Open [share.streamlit.io](https://share.streamlit.io), connect GitHub, select the private repository and `main` branch, and create the app.
-
-### 5. Set the app file
-
-Set the main file path to:
-
-```text
-app.py
-```
-
-### 6. Add Streamlit secrets
-
-Copy `.streamlit/secrets.example.toml` into the Community Cloud Secrets editor and replace the required placeholders:
+Only these Streamlit secrets are required:
 
 ```toml
 SUPABASE_URL = "https://your-project.supabase.co"
 SUPABASE_ANON_KEY = "your-anon-key"
 APP_PASSWORD = "use-a-long-random-password"
-COINGECKO_API_KEY = ""
-TWELVE_DATA_API_KEY = ""
-FMP_API_KEY = ""
-OPENFIGI_API_KEY = ""
 ```
 
-Only the first three are required. Optional provider keys may remain empty. Never use the Supabase service-role key and never commit real secrets.
+yfinance, unauthenticated OpenFIGI, ECB, RSS, and permitted public pages require no paid key. `OPENFIGI_API_KEY` and `COINGECKO_API_KEY` are optional. FMP and Twelve Data remain disabled unless their optional keys exist; their absence never blocks the app.
 
-### 7. Reboot the app
+Free sources often do not provide dependable ETF TER data. A candidate ETF/ETC/ETP cannot become buy/add eligible until cost data is confirmed or extracted from a high-confidence source. Existing holdings can still be valued when TER is absent.
 
-Save the secrets, then reboot or redeploy the Community Cloud app so the server reloads them.
+## 3. Internet enrichment and scraping
 
-### 8. Log in
+The app ranks official issuer/factsheet pages first, then official exchanges, accessible ETF aggregators, and finance portals. It respects `robots.txt` where possible and does not bypass paywalls, logins, captchas, or anti-bot controls. It never scrapes Scalable Capital.
 
-Open the generated `https://YOUR-APP.streamlit.app` URL and enter `APP_PASSWORD`. No localhost is needed after deployment. No portfolio data is displayed before successful authentication.
+> Web-scraped data may be incomplete or outdated. Confirm important data from the issuer factsheet before investing.
 
-### 9. Add holdings
+## 4. Missing Data Repair Center
 
-Open **Current Portfolio**. Add/edit/delete rows with the data editor or import CSV. Add manual prices even when using live symbols so valuation has a fallback. Click **Save portfolio to Supabase**.
+Open **Market Data & News → Missing Data Repair Center** to find absent symbols, TER/cost, asset type, category, factsheets, compatibility confirmations, conflicts, failed scrapes, and OpenFIGI rate limits. Use **Auto repair now** or **Search web and retry** before entering a fallback value.
 
-### 10. Add candidate assets
+Readiness has two levels:
 
-Open **Candidate Universe**. Add assets manually or import CSV. Complete Price Symbol, category, asset type, costs, compatibility, source URL, and confidence. Missing critical data remains manual-review/watchlist only.
+- Valuation ready: quantity, a live or fallback price, and usable currency/FX.
+- Recommendation ready: valuation ready plus category, asset type, source/confidence, confirmed Scalable compatibility for candidates, and verified fund cost data where applicable.
 
-### 11. Refresh live prices
+## 5. Market news and sentiment
 
-Use **Refresh market data** on the valuation, current portfolio, candidate, or research pages. Prices are cached for 15 minutes, history for one hour, and FX for 12 hours. Crypto symbols such as `BTC-USD` try CoinGecko first. Failed live prices use the manual holding price and display a warning.
+**Market Data & News** fetches legal public RSS and available yfinance headlines. The explainable lexicon engine reports sentiment, confidence, evidence count, and a combined market regime. Provider or news failure does not crash valuation or rebalancing.
 
-### 12. Save a valuation snapshot
+## 6. Strategy refresh
 
-Open **Valuation Dashboard** and click **Save today's valuation snapshot**. Daily, weekly, monthly, and yearly changes compare current value with the closest Supabase snapshot. Missing periods show **Not enough history yet**.
+The **Strategy** section shows targets, risk profile, regime, preferred/reduced themes, risks, and savings-plan implications. Strategy changes are evidence-gated: weak news evidence does not manufacture a new market view. Save strategy snapshots to Supabase for history.
 
-### 13. Generate the rebalance report
+## 7. Full rebalance pipeline
 
-Review **Asset Quality Dashboard**, **Rebalance Engine**, **Savings Plan Optimizer**, and **Recommendation Report**. Export CSV if needed or save recommendations to Supabase.
+**Rebalance → Run full rebalance** performs the complete workflow: price refresh, ISIN/ticker enrichment, missing-metadata repair, news, sentiment, strategy redesign, valuation, drift, scoring, portfolio optimization, savings-plan optimization, recommendation report, manual execution checklist, and Supabase snapshots.
 
-## App pages
+Recommendations use Scalable Capital PRIME+ assumptions:
 
-1. Dashboard
-2. Valuation Dashboard
-3. Current Portfolio
-4. Candidate Universe
-5. Market Research Dashboard
-6. Asset Quality Dashboard
-7. Rebalance Engine
-8. Savings Plan Optimizer
-9. Recommendation Report
-10. Settings
+- Prefer EIX/gettex and avoid Xetra unless specifically needed.
+- Use whole quantities for stocks, ETFs, ETCs, and ETPs; crypto may be fractional.
+- Direct buys below €250 are usually fee-inefficient.
+- The default below-threshold round-trip warning is €1.98.
+- Every execution recommendation says to check the live Scalable price.
 
-## Scoring and recommendation rules
+## 8. Using Scalable screenshots
 
-Total score is momentum 25%, asset quality 25%, cost 15%, portfolio fit 25%, and risk control 10%.
+Open **Portfolio → Holding screenshot upload**. Upload an image, paste its visible text, parse European-formatted values, and confirm/correct every field. The image is stored privately in Supabase Storage—not GitHub. Existing category, asset type, and price symbol are preserved unless explicitly confirmed.
 
-- 8.0–10: eligible for buy/add when critical data is complete
-- 6.5–7.9: watchlist only
-- Below 6.5: avoid/no buy
-- Missing symbol/manual price, category, asset type, fund cost information, or Scalable compatibility: manual review only
+## 9. Updating savings plans in the app
 
-Default targets are Core 25%, EM 15%, Growth 40%, Defence 5%, Commodities 10%, Crypto 5%, and Cash 0–2%.
+The optimizer can add, pause, increase, reduce, or remove app records while keeping the configured monthly budget. Export the Scalable execution checklist and apply it manually in the broker.
 
-Scalable Capital assumptions:
+> Changes saved here do not update actual Scalable Capital savings plans.
 
-- Germany-based PRIME+ investor
-- Prefer EIX/gettex; avoid Xetra unless explicitly needed
-- Whole quantities for stocks, ETFs, ETCs, and ETPs
-- Crypto may be fractional
-- Direct trades below €250 are normally avoided
-- Below-threshold fee warning: €0.99 buy + €0.99 sell = €1.98 round trip
-- €250+ EIX/gettex PRIME+ orders may avoid order fees; verify manually
-- Every execution action says **Check live Scalable price before execution**
+## 10. Deployment on Streamlit Community Cloud
 
-## Local development (optional)
+1. Create a private GitHub repository and push this code.
+2. Confirm `.env`, `.streamlit/secrets.toml`, `data/`, `uploads/`, screenshots, and CSV exports are not staged.
+3. Create a Supabase project, preferably in an appropriate EU region.
+4. Run all of `supabase_schema.sql` in Supabase SQL Editor.
+5. Create a Streamlit Community Cloud app from the GitHub repository.
+6. Set the main file to `app.py`.
+7. Add the three required secrets shown above.
+8. Reboot the app and log in with `APP_PASSWORD`.
+9. Add holdings and candidates, then save them to Supabase.
+10. Refresh prices/metadata and save a valuation snapshot.
+11. Review strategy and run the full rebalance.
 
-Create `.streamlit/secrets.toml` locally using the example file, then run:
+No localhost is needed after deployment.
+
+## 11. Supabase setup
+
+`supabase_schema.sql` creates holdings, candidate assets, savings plans, valuation snapshots, recommendations, settings, market news, strategy snapshots, rebalance runs, indexes, MVP row-level policies, and a private screenshot bucket.
+
+The password-gated MVP uses `user_id = "default_user"` and passes it from the private Streamlit server in an `x-user-id` header. Before supporting multiple users, migrate to Supabase Auth and `auth.uid()`-based RLS. Never use or expose the Supabase service-role key.
+
+## 12. Troubleshooting
+
+- `ModuleNotFoundError`: confirm the package is in `requirements.txt`, push, and reboot Streamlit Cloud.
+- Supabase error: verify URL, anon key, project status, and that the latest SQL schema ran.
+- Blank data: save rows from the app; demo data is not persisted automatically.
+- Live price missing: verify the Yahoo exchange suffix and run Data Enrichment; then provide a fallback price if every route fails.
+- TER missing: add an official factsheet URL or confirmed cost note. Missing TER blocks new fund buy/add eligibility, not existing-holding valuation.
+- OpenFIGI 429: wait and retry; the engine continues through yfinance and web enrichment.
+- Internet price mismatch: free prices can be delayed or use a different venue/currency. Check Scalable bid/ask and spread before execution.
+
+## Local development and tests
+
+Copy `.streamlit/secrets.example.toml` to `.streamlit/secrets.toml`, fill local development credentials, then run:
 
 ```powershell
 python -m pip install -r requirements.txt
 python -m streamlit run app.py
-```
-
-The real secrets file is ignored by Git.
-
-## Troubleshooting
-
-### `ModuleNotFoundError`
-
-Confirm the package is present in `requirements.txt`, push the change, and reboot the Community Cloud app.
-
-### Supabase connection error
-
-Check `SUPABASE_URL`, `SUPABASE_ANON_KEY`, project status, and whether `supabase_schema.sql` ran successfully. Use the anon key—not the service-role key.
-
-### Blank data
-
-Run the SQL schema, log in, add rows, and click the relevant Supabase save button. Empty databases initially show safe demo data that is not persisted until saved.
-
-### Live prices missing
-
-Add the exact Yahoo/CoinGecko Price Symbol or enter a manual price. Verify exchange suffixes such as `.DE`, `.L`, or `.AS`.
-
-### Internet price differs from Scalable Capital
-
-Free prices may be delayed or use another exchange/currency. Check the live Scalable bid/ask, spread, venue, taxes, and fees before execution.
-
-## Tests
-
-```powershell
 python -m pytest -q
 ```
 
-Tests do not require production credentials. They cover database payloads, valuation and snapshot gains, market-data fallbacks, scoring, missing-data watchlists, savings-plan budgets, optimizer order, storage paths, and fee warnings.
+The real secrets file is ignored by Git. Tests do not require production credentials or paid market-data keys.

@@ -26,4 +26,4 @@ def test_missing_critical_data_forces_manual_review_band():
     scored = score_assets(assets, research, drift, {"portfolio_total_eur": 1000,
         "direct_trade_minimum": 250, "max_single_holding_weight": 25,
         "risk_profile": "Aggressive", "max_crypto_weight": 5})
-    assert scored.loc[0, "score_band"] == "Manual review required"
+    assert scored.loc[0, "score_band"] == "Data enrichment required before buy/add"

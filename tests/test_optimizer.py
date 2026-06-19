@@ -14,7 +14,7 @@ def test_optimizer_blocks_candidate_with_missing_critical_data():
     drift = pd.DataFrame([{"category": "Core", "status": "Underweight", "drift_eur": -500}])
     result = generate_market_aware_recommendations(pd.DataFrame(), candidate, drift, SETTINGS)
     assert result.loc[0, "Action"] == "No trade"
-    assert "Critical data is missing" in result.loc[0, "Reason"]
+    assert "Market Data Engine" in result.loc[0, "Reason"]
 
 
 def test_optimizer_sells_weak_overweight_before_buying_strong_candidate():

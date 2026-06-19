@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from math import floor
 from typing import Iterable
+from copy import deepcopy
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -14,7 +15,15 @@ ON_TARGET_DRIFT_PCT = 1.0
 HOLDING_COLUMNS = ["instrument", "isin", "ticker_id", "price_symbol", "asset_type", "category", "theme", "region", "quantity",
                    "manual_current_price", "live_current_price", "price_source", "currency", "fx_rate_to_eur",
                    "current_value_eur", "buy_in_value_eur", "pl_eur", "pl_pct",
-                   "direct_trading_allowed", "fractional_allowed", "notes"]
+                   "direct_trading_allowed", "fractional_allowed", "notes", "wkn", "current_price_eur",
+                   "buy_in_price_eur", "sell_price_eur", "buy_price_eur", "spread_eur", "spread_percent",
+                   "screenshot_path", "screenshot_captured_at", "source", "user_confirmed",
+                   "valuation_ready", "recommendation_ready", "valuation_review_reasons",
+                   "recommendation_review_reasons", "provider_status", "enrichment_audit", "web_scrape_status",
+                   "web_scrape_last_run", "web_scrape_sources", "web_scrape_confidence", "factsheet_url",
+                   "kid_url", "issuer", "metadata_conflicts", "enrichment_suggestions", "confirmed_by_user",
+                   "suggested_price_symbols", "suggested_asset_type", "suggested_category",
+                   "manual_review_attempted", "last_auto_repair_at"]
 
 
 class Holding(BaseModel):
@@ -63,20 +72,38 @@ def _normalise_holdings(data: pd.DataFrame) -> pd.DataFrame:
                 "live_current_price": 0.0, "price_source": "Manual fallback", "currency": "EUR",
                 "fx_rate_to_eur": 1.0, "current_value_eur": 0.0, "buy_in_value_eur": 0.0,
                 "pl_eur": 0.0, "pl_pct": 0.0,
-                "direct_trading_allowed": True, "fractional_allowed": False, "notes": ""}
+                "direct_trading_allowed": True, "fractional_allowed": False, "notes": "",
+                "wkn": "", "current_price_eur": 0.0, "buy_in_price_eur": 0.0, "sell_price_eur": 0.0,
+                "buy_price_eur": 0.0, "spread_eur": 0.0, "spread_percent": 0.0, "screenshot_path": "",
+                "screenshot_captured_at": "", "source": "", "user_confirmed": False,
+                "valuation_ready": False, "recommendation_ready": False, "valuation_review_reasons": "",
+                "recommendation_review_reasons": "", "provider_status": [], "enrichment_audit": [],
+                "web_scrape_status": "", "web_scrape_last_run": "", "web_scrape_sources": [],
+                "web_scrape_confidence": "", "factsheet_url": "", "kid_url": "", "issuer": "",
+                "metadata_conflicts": {}, "enrichment_suggestions": {}, "confirmed_by_user": False,
+                "suggested_price_symbols": [], "suggested_asset_type": "", "suggested_category": "",
+                "manual_review_attempted": False, "last_auto_repair_at": ""}
     for column, default in defaults.items():
         if column not in frame:
-            frame[column] = default
+            frame[column] = ([deepcopy(default) for _ in range(len(frame))]
+                             if isinstance(default, (dict, list)) else default)
     string_columns = ["instrument", "isin", "ticker_id", "price_symbol", "asset_type", "category", "theme", "region",
-                      "price_source", "currency", "notes"]
+                      "price_source", "currency", "notes", "wkn", "screenshot_path", "screenshot_captured_at",
+                      "source", "valuation_review_reasons", "recommendation_review_reasons", "web_scrape_status",
+                      "web_scrape_last_run", "web_scrape_confidence", "factsheet_url", "kid_url", "issuer",
+                      "suggested_asset_type", "suggested_category", "last_auto_repair_at"]
     for column in string_columns:
         frame[column] = frame[column].fillna("").astype(str)
     frame["currency"] = frame["currency"].replace("", "EUR")
     frame["price_source"] = frame["price_source"].replace("", "Manual fallback")
-    for column, default in (("direct_trading_allowed", True), ("fractional_allowed", False)):
+    for column, default in (("direct_trading_allowed", True), ("fractional_allowed", False),
+                            ("user_confirmed", False), ("valuation_ready", False),
+                            ("recommendation_ready", False), ("confirmed_by_user", False),
+                            ("manual_review_attempted", False)):
         frame[column] = frame[column].fillna(default).astype(bool)
     for column in ["quantity", "manual_current_price", "live_current_price", "fx_rate_to_eur",
-                   "current_value_eur", "buy_in_value_eur", "pl_eur", "pl_pct"]:
+                   "current_value_eur", "buy_in_value_eur", "pl_eur", "pl_pct", "current_price_eur",
+                   "buy_in_price_eur", "sell_price_eur", "buy_price_eur", "spread_eur", "spread_percent"]:
         frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
     missing_price = (frame["manual_current_price"] <= 0) & (frame["quantity"] > 0)
     frame.loc[missing_price, "manual_current_price"] = frame.loc[missing_price, "current_value_eur"] / frame.loc[missing_price, "quantity"]

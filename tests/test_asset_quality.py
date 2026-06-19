@@ -7,7 +7,7 @@ def test_etf_missing_critical_data_is_blocked():
     result = calculate_asset_quality(asset)
     assert result["manual_review_required"]
     assert "TER % or manual cost note" in critical_missing_fields(asset)
-    assert "Manual review required" in result["quality_reason"]
+    assert "Data enrichment required" in result["quality_reason"]
 
 
 def test_complete_low_cost_liquid_etf_scores_well():
