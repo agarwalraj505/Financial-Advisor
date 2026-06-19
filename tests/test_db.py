@@ -2,8 +2,12 @@ import math
 
 import pandas as pd
 
-from db import (Database, candidate_to_payload, holding_to_payload, recommendation_to_payload,
-                snapshot_to_payload)
+from db import (Database, candidate_to_payload, delete_candidate_asset, delete_holding,
+                get_candidate_assets, get_holdings, get_recommendations, get_savings_plans,
+                get_settings, get_valuation_snapshots, holding_to_payload,
+                insert_recommendations, insert_valuation_snapshot, recommendation_to_payload,
+                snapshot_to_payload, upsert_candidate_asset, upsert_holding, upsert_savings_plan,
+                upsert_setting)
 
 
 def test_holding_payload_maps_app_columns_and_removes_nan():
@@ -80,3 +84,11 @@ def test_settings_are_upserted_as_json_values():
     assert table == "app_settings"
     assert conflict == "user_id,setting_key"
     assert {row["setting_key"] for row in rows} == {"monthly_savings_budget", "target_allocations"}
+
+
+def test_required_database_helper_api_is_available():
+    helpers = [get_holdings, upsert_holding, delete_holding, get_candidate_assets,
+               upsert_candidate_asset, delete_candidate_asset, get_savings_plans,
+               upsert_savings_plan, get_valuation_snapshots, insert_valuation_snapshot,
+               get_recommendations, insert_recommendations, get_settings, upsert_setting]
+    assert all(callable(helper) for helper in helpers)

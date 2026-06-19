@@ -21,15 +21,18 @@ def _number(value, default=None):
 def critical_missing_fields(asset: dict | pd.Series) -> list[str]:
     missing = []
     asset_type = str(asset.get("asset_type", ""))
-    if not str(asset.get("price_symbol", "") or "").strip():
-        missing.append("Price Symbol")
+    if not str(asset.get("price_symbol", "") or "").strip() and not (_number(asset.get("manual_current_price"), 0) or 0):
+        missing.append("Price Symbol or manual current price")
+    if not str(asset.get("category", "") or "").strip():
+        missing.append("Category")
+    if not asset_type.strip():
+        missing.append("Asset type")
     if asset_type in FUND_TYPES:
-        if _number(asset.get("ter_pct")) is None:
-            missing.append("TER %")
-        if (_number(asset.get("fund_size_eur"), 0) or 0) <= 0:
-            missing.append("Fund size EUR")
-        if _number(asset.get("manual_spread_estimate_pct")) is None:
-            missing.append("Manual spread estimate %")
+        notes = str(asset.get("notes", "") or "").lower()
+        if _number(asset.get("ter_pct")) is None and not any(word in notes for word in ("ter", "cost", "fee")):
+            missing.append("TER % or manual cost note")
+    if not bool(asset.get("scalable_compatible", True)):
+        missing.append("Scalable compatibility")
     return missing
 
 
@@ -53,6 +56,8 @@ def calculate_asset_quality(asset: dict | pd.Series, market_metrics: dict | None
             reasons.append(f"spread estimate {spread:.2f}%")
         if liquidity is not None:
             values.append(max(0, min(10, liquidity)))
+        if bool(asset.get("savings_plan_available", False)):
+            values.append(8.0)
         replication = str(asset.get("replication_method", "")).lower()
         if replication:
             values.append(9 if "physical" in replication else 8 if "optim" in replication else 6)

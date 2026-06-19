@@ -4,7 +4,9 @@ import pandas as pd
 
 from insights import generate_insights
 from market_data import MarketQuote
-from valuation import calculate_historical_gains, calculate_position_value, valuate_holdings
+from valuation import (calculate_category_allocation, calculate_current_value, calculate_historical_gains,
+                       calculate_pl, calculate_portfolio_totals, create_valuation_snapshot,
+                       calculate_position_value, valuate_holdings)
 
 
 def holding(**overrides):
@@ -52,6 +54,20 @@ def test_daily_weekly_monthly_yearly_gains():
 def test_missing_history_behavior():
     gains = calculate_historical_gains(100, pd.DataFrame())
     assert all(value is None for value in gains.values())
+
+
+def test_public_valuation_helpers_and_snapshot_creation():
+    holdings = pd.DataFrame([{"category": "Core", "current_value_eur": 120, "buy_in_value_eur": 100},
+                             {"category": "Cash", "current_value_eur": 30, "buy_in_value_eur": 30}])
+    assert calculate_current_value(2, 50, .8) == 80
+    assert calculate_pl(120, 100) == {"pl_eur": 20.0, "pl_percent": 20.0}
+    assert calculate_category_allocation(holdings)["weight_percent"].sum() == 100
+    totals = calculate_portfolio_totals(holdings)
+    assert totals["total_value_eur"] == 150
+    assert totals["cash_eur"] == 30
+    snapshot = create_valuation_snapshot(holdings, pd.DataFrame(), datetime(2026, 6, 19, tzinfo=timezone.utc))
+    assert snapshot["date"] == "2026-06-19"
+    assert snapshot["daily_gain_eur"] is None
 
 
 def test_insight_generation():

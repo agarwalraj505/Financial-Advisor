@@ -9,6 +9,7 @@ import pandas as pd
 
 from rebalancer import holdings_to_dataframe
 from sample_data import CANDIDATE_COLUMNS
+from supabase_client import SupabaseGateway, get_supabase_client
 
 
 def clean_value(value):
@@ -54,10 +55,7 @@ CANDIDATE_MAP = {"instrument": "instrument", "isin": "isin", "ticker_id": "ticke
     "cost_score": "cost_score", "portfolio_fit_score": "portfolio_fit_score",
     "risk_control_score": "risk_control_score", "total_score": "total_score", "data_source": "data_source",
     "source_url": "source_url", "data_confidence": "data_confidence", "last_updated": "last_updated",
-    "notes": "notes", "overlap_score": "overlap_score", "tracking_quality_score": "tracking_quality_score",
-    "inception_date": "inception_date", "revenue_growth_score": "revenue_growth_score",
-    "earnings_quality_score": "earnings_quality_score", "valuation_fundamental_score": "valuation_fundamental_score",
-    "profitability_score": "profitability_score", "balance_sheet_score": "balance_sheet_score"}
+    "notes": "notes"}
 
 SAVINGS_MAP = {"instrument": "instrument", "isin": "isin", "current_plan": "current_plan_eur",
                "new_plan": "new_plan_eur", "action": "action", "reason": "reason", "score": "score"}
@@ -153,3 +151,83 @@ class Database:
         rows = [{"user_id": self.user_id, "setting_key": key, "setting_value": clean_value(value),
                  "updated_at": now} for key, value in settings.items()]
         self.gateway.upsert("app_settings", rows, on_conflict="user_id,setting_key")
+
+
+# Beginner-friendly module-level helpers requested by the Streamlit app contract.
+def get_database(user_id: str = "default_user") -> Database:
+    return Database(SupabaseGateway(get_supabase_client(user_id)), user_id)
+
+
+def get_holdings(user_id: str = "default_user") -> pd.DataFrame:
+    return get_database(user_id).load_holdings()
+
+
+def upsert_holding(user_id: str, row: dict) -> list[dict]:
+    gateway = get_database(user_id).gateway
+    payload = holding_to_payload(row, user_id)
+    if row.get("id"):
+        payload["id"] = row["id"]
+        return gateway.upsert("holdings", payload, on_conflict="id")
+    return gateway.insert("holdings", payload)
+
+
+def delete_holding(user_id: str, holding_id: str) -> list[dict]:
+    return get_database(user_id).gateway.delete("holdings", {"user_id": user_id, "id": holding_id})
+
+
+def get_candidate_assets(user_id: str = "default_user") -> pd.DataFrame:
+    return get_database(user_id).load_candidates()
+
+
+def upsert_candidate_asset(user_id: str, row: dict) -> list[dict]:
+    gateway = get_database(user_id).gateway
+    payload = candidate_to_payload(row, user_id)
+    if row.get("id"):
+        payload["id"] = row["id"]
+        return gateway.upsert("candidate_assets", payload, on_conflict="id")
+    return gateway.insert("candidate_assets", payload)
+
+
+def delete_candidate_asset(user_id: str, asset_id: str) -> list[dict]:
+    return get_database(user_id).gateway.delete("candidate_assets", {"user_id": user_id, "id": asset_id})
+
+
+def get_savings_plans(user_id: str = "default_user") -> pd.DataFrame:
+    return get_database(user_id).load_savings_plans()
+
+
+def upsert_savings_plan(user_id: str, row: dict) -> list[dict]:
+    source = dict(row)
+    source.setdefault("current_plan", source.get("current_plan_eur", 0))
+    source.setdefault("new_plan", source.get("new_plan_eur", 0))
+    payload = savings_to_payload(source, user_id)
+    gateway = get_database(user_id).gateway
+    if row.get("id"):
+        payload["id"] = row["id"]
+        return gateway.upsert("savings_plans", payload, on_conflict="id")
+    return gateway.insert("savings_plans", payload)
+
+
+def get_valuation_snapshots(user_id: str = "default_user") -> pd.DataFrame:
+    return get_database(user_id).load_snapshots()
+
+
+def insert_valuation_snapshot(user_id: str, snapshot: dict) -> None:
+    get_database(user_id).save_snapshot(snapshot)
+
+
+def get_recommendations(user_id: str = "default_user") -> pd.DataFrame:
+    return get_database(user_id).load_recommendations()
+
+
+def insert_recommendations(user_id: str, recommendations) -> None:
+    frame = recommendations if isinstance(recommendations, pd.DataFrame) else pd.DataFrame(recommendations)
+    get_database(user_id).save_recommendations(frame)
+
+
+def get_settings(user_id: str = "default_user") -> dict[str, Any]:
+    return get_database(user_id).load_settings()
+
+
+def upsert_setting(user_id: str, key: str, value: Any) -> None:
+    get_database(user_id).save_settings({key: value})

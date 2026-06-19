@@ -1,23 +1,17 @@
 -- Run once in the Supabase SQL editor.
--- MVP security model: private Streamlit server + password gate + pseudonymous x-user-id header.
+-- MVP security model: private Streamlit server + password gate + fixed default_user scope.
 -- Before supporting multiple users, replace the anon policies below with Supabase Auth
 -- policies based on auth.uid() and change user_id columns to uuid foreign keys.
 
 create extension if not exists pgcrypto;
 
-create table if not exists public.profiles (
-  id uuid primary key default gen_random_uuid(),
-  email text,
-  created_at timestamptz not null default now()
-);
-
 create table if not exists public.holdings (
   id uuid primary key default gen_random_uuid(), user_id text not null,
   instrument text, isin text, ticker_id text, price_symbol text, asset_type text,
-  category text, theme text, region text, currency text,
-  quantity numeric, manual_current_price numeric, live_current_price numeric,
-  price_source text, fx_rate_to_eur numeric, current_value_eur numeric,
-  buy_in_value_eur numeric, pl_eur numeric, pl_percent numeric,
+  category text, theme text, region text, currency text default 'EUR',
+  quantity numeric default 0, manual_current_price numeric default 0, live_current_price numeric,
+  price_source text, fx_rate_to_eur numeric default 1, current_value_eur numeric default 0,
+  buy_in_value_eur numeric default 0, pl_eur numeric default 0, pl_percent numeric default 0,
   direct_trading_allowed boolean default true, fractional_allowed boolean default false,
   notes text, created_at timestamptz not null default now(), updated_at timestamptz not null default now()
 );
@@ -25,17 +19,15 @@ create table if not exists public.holdings (
 create table if not exists public.candidate_assets (
   id uuid primary key default gen_random_uuid(), user_id text not null,
   instrument text, isin text, ticker_id text, price_symbol text, asset_type text,
-  category text, theme text, region text, currency text, ter_percent numeric,
+  category text, theme text, region text, currency text default 'EUR', ter_percent numeric,
   fund_size_eur numeric, replication_method text, distribution_policy text, domicile text,
-  savings_plan_available boolean default false, direct_trading_available boolean default false,
-  fractional_allowed boolean default false, scalable_compatible boolean default false,
-  preferred_venue text, manual_spread_estimate_percent numeric, liquidity_score numeric,
+  savings_plan_available boolean default false, direct_trading_available boolean default true,
+  fractional_allowed boolean default false, scalable_compatible boolean default true,
+  preferred_venue text default 'EIX/gettex', manual_spread_estimate_percent numeric, liquidity_score numeric,
   quality_score numeric, momentum_score numeric, valuation_score numeric, cost_score numeric,
   portfolio_fit_score numeric, risk_control_score numeric, total_score numeric,
   data_source text, source_url text, data_confidence text, last_updated timestamptz, notes text,
-  overlap_score numeric, tracking_quality_score numeric, inception_date date,
-  revenue_growth_score numeric, earnings_quality_score numeric,
-  valuation_fundamental_score numeric, profitability_score numeric, balance_sheet_score numeric
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now()
 );
 
 create table if not exists public.savings_plans (
@@ -47,9 +39,9 @@ create table if not exists public.savings_plans (
 
 create table if not exists public.valuation_snapshots (
   id uuid primary key default gen_random_uuid(), user_id text not null,
-  snapshot_date date not null, timestamp timestamptz not null default now(),
-  total_value_eur numeric, cash_eur numeric, invested_value_eur numeric,
-  unrealized_pl_eur numeric, daily_gain_eur numeric, daily_gain_percent numeric,
+  snapshot_date date not null default current_date, timestamp timestamptz not null default now(),
+  total_value_eur numeric default 0, cash_eur numeric default 0, invested_value_eur numeric default 0,
+  unrealized_pl_eur numeric default 0, daily_gain_eur numeric, daily_gain_percent numeric,
   weekly_gain_eur numeric, weekly_gain_percent numeric, monthly_gain_eur numeric,
   monthly_gain_percent numeric, yearly_gain_eur numeric, yearly_gain_percent numeric,
   unique (user_id, snapshot_date)
@@ -74,8 +66,8 @@ create index if not exists candidates_user_idx on public.candidate_assets(user_i
 create index if not exists savings_user_idx on public.savings_plans(user_id);
 create index if not exists snapshots_user_date_idx on public.valuation_snapshots(user_id, snapshot_date);
 create index if not exists recommendations_user_idx on public.recommendations(user_id, created_at desc);
+create index if not exists app_settings_user_idx on public.app_settings(user_id);
 
-alter table public.profiles enable row level security;
 alter table public.holdings enable row level security;
 alter table public.candidate_assets enable row level security;
 alter table public.savings_plans enable row level security;

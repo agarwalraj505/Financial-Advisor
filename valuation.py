@@ -13,6 +13,48 @@ def calculate_position_value(quantity: float, price: float, fx_rate_to_eur: floa
     return round(float(quantity) * float(price) * float(fx_rate_to_eur), 2)
 
 
+def calculate_current_value(quantity: float, price: float, fx_rate_to_eur: float = 1.0) -> float:
+    """Public beginner-friendly alias used by the web app contract."""
+    return calculate_position_value(quantity, price, fx_rate_to_eur)
+
+
+def calculate_pl(current_value: float, buy_in_value: float) -> dict[str, float]:
+    profit = float(current_value) - float(buy_in_value)
+    percent = profit / float(buy_in_value) * 100 if buy_in_value else 0.0
+    return {"pl_eur": round(profit, 2), "pl_percent": round(percent, 2)}
+
+
+def calculate_category_allocation(holdings: pd.DataFrame) -> pd.DataFrame:
+    if holdings.empty:
+        return pd.DataFrame(columns=["category", "current_value_eur", "weight_percent"])
+    frame = holdings.copy()
+    if "current_value_eur" not in frame:
+        frame["current_value_eur"] = 0.0
+    frame["current_value_eur"] = pd.to_numeric(frame["current_value_eur"], errors="coerce").fillna(0)
+    if "category" not in frame:
+        frame["category"] = "Uncategorised"
+    total = float(frame["current_value_eur"].sum())
+    grouped = frame.groupby("category", as_index=False)["current_value_eur"].sum()
+    grouped["weight_percent"] = grouped["current_value_eur"] / total * 100 if total else 0.0
+    return grouped.round(2)
+
+
+def calculate_portfolio_totals(holdings: pd.DataFrame) -> dict[str, float]:
+    if holdings.empty:
+        return {"total_value_eur": 0.0, "invested_value_eur": 0.0,
+                "unrealized_pl_eur": 0.0, "unrealized_pl_percent": 0.0, "cash_eur": 0.0}
+    current = pd.to_numeric(holdings["current_value_eur"], errors="coerce").fillna(0) if "current_value_eur" in holdings else pd.Series(0.0, index=holdings.index)
+    invested = pd.to_numeric(holdings["buy_in_value_eur"], errors="coerce").fillna(0) if "buy_in_value_eur" in holdings else pd.Series(0.0, index=holdings.index)
+    total, buy_in = float(current.sum()), float(invested.sum())
+    profit = total - buy_in
+    categories = holdings.get("category", pd.Series(index=holdings.index, dtype=str)).astype(str)
+    cash = float(current[categories == "Cash"].sum())
+    return {"total_value_eur": round(total, 2), "invested_value_eur": round(buy_in, 2),
+            "unrealized_pl_eur": round(profit, 2),
+            "unrealized_pl_percent": round(profit / buy_in * 100, 2) if buy_in else 0.0,
+            "cash_eur": round(cash, 2)}
+
+
 def valuate_holdings(
     holdings: pd.DataFrame,
     quotes: dict[str, MarketQuote] | None = None,
@@ -106,3 +148,20 @@ def calculate_historical_gains(
         closest_index = (prior["timestamp"] - target).abs().idxmin()
         result[label] = gain_from(float(prior.loc[closest_index, "total_value_eur"]))
     return result
+
+
+def calculate_snapshot_gains(current_value: float, historical_snapshots: pd.DataFrame,
+                             as_of: datetime | None = None):
+    return calculate_historical_gains(current_value, historical_snapshots, as_of)
+
+
+def create_valuation_snapshot(holdings: pd.DataFrame, historical_snapshots: pd.DataFrame,
+                              as_of: datetime | None = None) -> dict:
+    as_of = as_of or datetime.now(timezone.utc)
+    totals = calculate_portfolio_totals(holdings)
+    gains = calculate_snapshot_gains(totals["total_value_eur"], historical_snapshots, as_of)
+    snapshot = {"date": as_of.date().isoformat(), "timestamp": as_of.isoformat(timespec="seconds"), **totals}
+    for period in ("daily", "weekly", "monthly", "yearly"):
+        snapshot[f"{period}_gain_eur"] = gains[period]["eur"] if gains[period] else None
+        snapshot[f"{period}_gain_pct"] = gains[period]["pct"] if gains[period] else None
+    return snapshot

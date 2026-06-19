@@ -13,9 +13,7 @@ CANDIDATE_COLUMNS = ["instrument", "isin", "ticker_id", "price_symbol", "asset_t
     "fractional_allowed", "scalable_compatible", "preferred_venue", "manual_spread_estimate_pct",
     "liquidity_score", "quality_score", "momentum_score", "valuation_score", "cost_score",
     "portfolio_fit_score", "risk_control_score", "total_score", "data_source", "source_url",
-    "data_confidence", "last_updated", "notes",
-    "overlap_score", "tracking_quality_score", "inception_date", "revenue_growth_score",
-    "earnings_quality_score", "valuation_fundamental_score", "profitability_score", "balance_sheet_score"]
+    "data_confidence", "last_updated", "notes"]
 
 
 def holding(instrument, isin, ticker, symbol, asset_type, category, quantity, value, buy_in, fractional=False):

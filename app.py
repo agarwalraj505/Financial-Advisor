@@ -9,7 +9,7 @@ import streamlit as st
 
 from auth import logout_button, require_authentication
 from db import Database
-from market_data import fetch_fx_rate_to_eur, fetch_market_quote
+from market_data import get_fx_rate_to_eur, get_market_quote
 from market_research import build_market_research
 from optimizer import generate_market_aware_recommendations, recommendation_execution_order
 from recommendation_engine import build_recommendation_report
@@ -44,21 +44,20 @@ SCORE_COLUMNS = ["Quality Score", "Momentum Score", "Cost Score", "Portfolio Fit
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_quote(symbol: str, bucket: int):
-    return fetch_market_quote(symbol)
+    return get_market_quote(symbol)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_fx(currency: str, bucket: int):
-    return fetch_fx_rate_to_eur(currency)
+    rate = get_fx_rate_to_eur(currency)
+    return rate, "" if rate else "FX rate unavailable"
 
 
 def _normalise_candidates(frame: pd.DataFrame) -> pd.DataFrame:
     frame = frame.copy()
     numeric = ["ter_pct", "fund_size_eur", "manual_spread_estimate_pct", "liquidity_score",
                "quality_score", "momentum_score", "valuation_score", "cost_score",
-               "portfolio_fit_score", "risk_control_score", "total_score", "overlap_score", "tracking_quality_score",
-               "revenue_growth_score", "earnings_quality_score", "valuation_fundamental_score",
-               "profitability_score", "balance_sheet_score"]
+               "portfolio_fit_score", "risk_control_score", "total_score"]
     booleans = ["savings_plan_available", "direct_trading_available", "fractional_allowed", "scalable_compatible"]
     for column in CANDIDATE_COLUMNS:
         if column not in frame:
@@ -243,6 +242,10 @@ def valuation_dashboard():
     left.plotly_chart(px.line(market_history, x="date", y="portfolio_value_eur", title="Portfolio live value over time"), width="stretch")
     allocation = calculate_allocation(details)
     right.plotly_chart(px.pie(allocation, names="category", values="value", hole=.4, title="Current allocation"), width="stretch")
+    comparison = st.session_state.drift.melt(id_vars="category",
+        value_vars=["current_weight", "target_weight"], var_name="Allocation", value_name="Weight %")
+    st.plotly_chart(px.bar(comparison, x="category", y="Weight %", color="Allocation", barmode="group",
+                           title="Current vs target allocation"), width="stretch")
     missing = details[details["price_source"] == "Missing"]
     fallback = details[(details["price_source"] == "Manual fallback") & (details["category"] != "Cash")]
     if not missing.empty:
@@ -269,12 +272,16 @@ def dashboard():
     st.header("Dashboard")
     details = st.session_state.valuation_details
     total = calculate_total_value(details)
+    invested = calculate_total_invested(details)
+    profit = calculate_unrealised_pl(details)
     cash = float(details.loc[details["category"] == "Cash", "current_value_eur"].sum())
-    columns = st.columns(4)
+    columns = st.columns(6)
     columns[0].metric("Portfolio value", f"€{total:,.2f}")
-    columns[1].metric("Cash", f"€{cash:,.2f}")
-    columns[2].metric("Holdings", len(details))
-    columns[3].metric("Candidates", len(st.session_state.candidates))
+    columns[1].metric("Invested value", f"€{invested:,.2f}")
+    columns[2].metric("Unrealised P/L", f"€{profit:+,.2f}", f"{profit / invested * 100:+.2f}%" if invested else None)
+    columns[3].metric("Cash", f"€{cash:,.2f}")
+    columns[4].metric("Holdings", len(details))
+    columns[5].metric("Candidates", len(st.session_state.candidates))
     left, right = st.columns(2)
     allocation = calculate_allocation(details)
     left.plotly_chart(px.pie(allocation, names="category", values="value", hole=.4,
@@ -291,6 +298,7 @@ def dashboard():
 def current_portfolio():
     st.header("Current Portfolio")
     st.caption("Portfolio data is stored in Supabase after you click save. No broker connection is used.")
+    refresh_controls("portfolio_refresh")
     display = st.session_state.holdings.rename(columns=HOLDING_DISPLAY)
     edited = st.data_editor(display, num_rows="dynamic", width="stretch", hide_index=True,
         disabled=["Live current price", "Price source", "Current value EUR", "P/L EUR", "P/L %"],
@@ -325,6 +333,7 @@ def upload_screenshots_page():
 def candidate_universe():
     st.header("Candidate Universe")
     st.info("TER, fund size, replication, domicile, distribution policy, spread, compatibility, and source details are manual-first. Missing critical data blocks buy/add recommendations.")
+    refresh_controls("candidate_refresh")
     scored = st.session_state.scored_candidates
     editable = st.session_state.candidates.copy()
     for column in ["quality_score", "momentum_score", "cost_score", "portfolio_fit_score",
@@ -395,6 +404,12 @@ def rebalance_engine():
     st.header("Rebalance Engine")
     st.warning("Decision support only. No broker connection or orders. Check live Scalable price before every execution.")
     recommendations, order = st.session_state.recommendations, recommendation_execution_order(st.session_state.recommendations)
+    if recommendations["Reason"].astype(str).str.contains("insufficient|cash", case=False, regex=True).any():
+        st.warning("Cash shortfall: lower-priority buys were reduced or deferred.")
+    if recommendations["Fee issue"].astype(str).str.contains("Below", case=False).any():
+        st.warning("Fee inefficiency: trades below the configured minimum should normally use a savings plan.")
+    if recommendations["Purpose"].astype(str).str.contains("Manual review", case=False).any():
+        st.warning("Manual review required: incomplete assets are blocked from buy/add recommendations.")
     st.subheader("Market-aware recommendations")
     st.dataframe(recommendations, width="stretch", hide_index=True)
     st.subheader("Execution order")
@@ -483,8 +498,8 @@ except SupabaseConnectionError as exc:
     st.info("Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit secrets, then run supabase_schema.sql.")
     st.stop()
 
-PAGES = ["Dashboard", "Valuation Dashboard", "Current Portfolio", "Upload Holdings Screenshots",
-         "Candidate Universe", "Market Research Dashboard", "Asset Quality Dashboard", "Rebalance Engine",
+PAGES = ["Dashboard", "Valuation Dashboard", "Current Portfolio", "Candidate Universe",
+         "Market Research Dashboard", "Asset Quality Dashboard", "Rebalance Engine",
          "Savings Plan Optimizer", "Recommendation Report", "Settings"]
 with st.sidebar:
     st.title("Market-Aware Wealth Manager")
@@ -493,7 +508,6 @@ with st.sidebar:
     logout_button()
 
 {"Dashboard": dashboard, "Valuation Dashboard": valuation_dashboard, "Current Portfolio": current_portfolio,
- "Upload Holdings Screenshots": upload_screenshots_page,
  "Candidate Universe": candidate_universe, "Market Research Dashboard": market_research_dashboard,
  "Asset Quality Dashboard": asset_quality_dashboard, "Rebalance Engine": rebalance_engine,
  "Savings Plan Optimizer": savings_plan_page, "Recommendation Report": recommendation_report_page,

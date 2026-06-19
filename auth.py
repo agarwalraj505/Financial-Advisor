@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hmac
-import hashlib
 
 import streamlit as st
 
@@ -23,8 +22,7 @@ def require_authentication() -> str | None:
         st.code('APP_PASSWORD = "use-a-long-random-password"')
         return None
     if st.session_state.get("authenticated"):
-        configured_id = _secret("APP_USER_ID")
-        return str(configured_id or hashlib.sha256(f"wealth-manager:{expected}".encode()).hexdigest())
+        return "default_user"
     st.title("Market-Aware Wealth Manager")
     st.caption("Enter the private app password to continue.")
     entered = st.text_input("Password", type="password", key="login_password")
