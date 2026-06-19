@@ -136,6 +136,50 @@ def render_rebalance_summary(recommendations):
                    f'{render_status_pill(f"{reviews} review/defer", "warning", render=False)}</div></div>')
 
 
+# Concise public names used by page code and future UI extensions.
+def page_header(title, subtitle, badges=None):
+    status = badges[0] if isinstance(badges, (list, tuple)) and badges else badges
+    return render_page_header(title, subtitle, status)
+
+
+def metric_card(label, value, delta=None, tone="neutral"):
+    return render_metric_card(label, value, delta, tone)
+
+
+def status_pill(text, tone="neutral"):
+    return render_status_pill(text, tone)
+
+
+def action_card(title, description, button_label=None):
+    action = f'<div class="hero-caption">{escape(str(button_label))}</div>' if button_label else ""
+    return _render(f'<div class="section-card"><div class="section-title">{escape(str(title))}</div>'
+                   f'<div class="section-body">{escape(str(description))}</div>{action}</div>')
+
+
+def section_card(title, subtitle=None):
+    return render_section_card(title, subtitle)
+
+
+def alert_card(message, tone="info"):
+    return render_alert(message, tone)
+
+
+def progress_step(label, status):
+    return render_flow_steps([{"label": label, "status": status}])
+
+
+def data_quality_badge(status):
+    return render_data_quality_badge(status)
+
+
+def news_card(title, source, published_at, sentiment, url):
+    return render_news_card(title, source, published_at, sentiment, url)
+
+
+def recommendation_card(action=None, instrument=None, reason=None, score=None, confidence=None, **fields):
+    return render_recommendation_card(action, instrument, reason, score, confidence, **fields)
+
+
 def style_figure(figure, height=390, showlegend=True):
     figure.update_layout(
         height=height, margin=dict(l=18, r=18, t=48, b=18), paper_bgcolor="rgba(0,0,0,0)",

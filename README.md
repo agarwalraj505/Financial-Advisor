@@ -6,11 +6,11 @@ This is decision support, not financial advice. It never connects to Scalable Ca
 
 ## Premium UI overview
 
-Financial Hub uses an original, Apple-inspired design system without Apple branding or proprietary assets. The interface is intentionally calm and compact: soft surfaces, rounded cards, generous spacing, responsive KPI layouts, consistent Plotly charts, source-confidence badges, guided workflows, and restrained gain/loss colors. The layout adapts its columns for narrower mobile screens.
+Financial Hub uses a bright, high-contrast fintech design system without third-party branding or proprietary assets. The interface is intentionally calm and practical: white cards, readable typography, responsive KPI layouts, consistent Plotly charts, source-confidence badges, guided workflows, and restrained gain/loss colors. The layout adapts its columns for narrower mobile screens.
 
 The presentation layer lives in:
 
-- `styles.py`: design tokens, responsive CSS, sidebar, cards, controls, tables, and optional system dark-mode styling.
+- `styles.py`: light-mode design tokens, responsive CSS, readable sidebar states, cards, controls, tables, and disabled-button styling.
 - `ui_components.py`: escaped page headers, hero summaries, metric cards, alerts, badges, news cards, recommendation cards, flow steps, empty states, and chart helpers.
 
 ## Navigation guide
@@ -28,9 +28,9 @@ The sidebar also shows Supabase connectivity, live-data status, and the latest r
 ## Portfolio workflow
 
 1. Open **Portfolio** and review the hero valuation and performance cards.
-2. Select **Holdings** to edit records, import CSV, refresh prices, and save to Supabase.
+2. Scroll to **Current holdings** to edit records, import CSV, refresh prices, and save to Supabase.
 3. Check the Live / Manual fallback / Missing and readiness labels before relying on a value.
-4. Use **Analytics** for value history, allocation, drift, holdings value, and winners/losers.
+4. Open **Detailed valuation analytics** only when you need performance history and deeper diagnostics.
 5. Save a valuation snapshot to create daily, weekly, monthly, and yearly comparison history.
 
 All valuation and performance figures remain estimates until confirmed against Scalable Capital.
@@ -73,7 +73,7 @@ The app ranks official issuer/factsheet pages first, then official exchanges, ac
 
 ## 4. Missing Data Repair Center
 
-Open **Market Data & News → Missing Data Repair Center** to find absent symbols, TER/cost, asset type, category, factsheets, compatibility confirmations, conflicts, failed scrapes, and OpenFIGI rate limits. Use **Auto repair now** or **Search web and retry** before entering a fallback value.
+Open **Market → Missing Data Repair** to find absent symbols, TER/cost, asset type, category, factsheets, compatibility confirmations, conflicts, failed scrapes, and OpenFIGI rate limits. Use **Auto repair selected asset** or **Retry public web search** before entering a fallback value.
 
 Readiness has two levels:
 
@@ -82,7 +82,7 @@ Readiness has two levels:
 
 ## 5. Market news and sentiment
 
-**Market Data & News** fetches legal public RSS and available yfinance headlines. The explainable lexicon engine reports sentiment, confidence, evidence count, and a combined market regime. Provider or news failure does not crash valuation or rebalancing.
+**Market** presents provider status, missing-data repair, enrichment audit, public news, sentiment, and candidate research as readable vertical sections. It fetches legal public RSS and available yfinance headlines. Provider or news failure does not crash valuation or rebalancing.
 
 ## 6. Strategy refresh
 
@@ -102,7 +102,7 @@ Recommendations use Scalable Capital PRIME+ assumptions:
 
 ## 8. Using Scalable screenshots
 
-Open **Portfolio → Holding screenshot upload**. Upload an image, paste its visible text, parse European-formatted values, and confirm/correct every field. The image is stored privately in Supabase Storage—not GitHub. Existing category, asset type, and price symbol are preserved unless explicitly confirmed.
+Open **Portfolio → Add or update a holding from a Scalable screenshot**. Upload an image, paste its visible text, parse European-formatted values, and confirm/correct every field. The image is stored privately in Supabase Storage—not GitHub. Existing category, asset type, and price symbol are preserved unless explicitly confirmed.
 
 ## 9. Updating savings plans in the app
 

@@ -326,7 +326,12 @@ def current_portfolio():
     render_section_card("Current holdings", "Edit app records, refresh market estimates, or import a portfolio CSV. Saving writes to your private Supabase project.")
     refresh_controls("portfolio_refresh")
     existing = st.session_state.holdings.copy()
-    display = existing[[column for column in HOLDING_DISPLAY if column in existing]].rename(columns=HOLDING_DISPLAY)
+    show_advanced = st.toggle("Show advanced holding columns", value=False, key="portfolio_advanced_columns")
+    compact_columns = ["instrument", "isin", "price_symbol", "asset_type", "category", "quantity",
+                       "manual_current_price", "live_current_price", "price_source", "current_value_eur",
+                       "buy_in_value_eur", "pl_eur", "pl_pct"]
+    selected_columns = [column for column in (HOLDING_DISPLAY if show_advanced else compact_columns) if column in existing]
+    display = existing[selected_columns].rename(columns=HOLDING_DISPLAY)
     source = existing.get("price_source", pd.Series("Missing", index=existing.index)).fillna("Missing").astype(str)
     display["Data quality"] = source.apply(
         lambda value: "● Manual fallback" if "manual" in value.lower() else "● Missing" if "missing" in value.lower() else "● Live")
@@ -334,8 +339,9 @@ def current_portfolio():
     recommendation_ready = existing.get("recommendation_ready", pd.Series(False, index=existing.index)).fillna(False)
     display["Readiness"] = ["● Recommendation ready" if rec else "● Valuation ready" if val else "● Review required"
                             for val, rec in zip(valuation_ready, recommendation_ready)]
+    disabled_columns = [column for column in ["Live current price", "Price source", "Current value EUR", "P/L EUR", "P/L %", "Data quality", "Readiness"] if column in display]
     edited = st.data_editor(display, num_rows="dynamic", width="stretch", hide_index=True,
-        disabled=["Live current price", "Price source", "Current value EUR", "P/L EUR", "P/L %", "Data quality", "Readiness"],
+        disabled=disabled_columns,
         column_config={"Category": st.column_config.SelectboxColumn(options=SUPPORTED_CATEGORIES)}, key="current_editor")
     edited_rows = edited.rename(columns={v: k for k, v in HOLDING_DISPLAY.items()}).to_dict("records")
     old_lookup = {str(row.get("isin")): row for row in existing.to_dict("records")}
@@ -675,12 +681,13 @@ def portfolio_section():
             refresh_live_data(True); _run_data_enrichment(False)
         st.toast("Portfolio market data refreshed", icon="✓"); st.rerun()
     action_right.caption("Prices are estimates for research. Scalable Capital remains the final execution source.")
-    tabs = st.tabs(["Overview", "Holdings", "Screenshot flow", "Analytics", "Snapshots"])
-    with tabs[0]: dashboard()
-    with tabs[1]: current_portfolio()
-    with tabs[2]: screenshot_workflow()
-    with tabs[3]: valuation_dashboard()
-    with tabs[4]:
+    dashboard()
+    current_portfolio()
+    with st.expander("Add or update a holding from a Scalable screenshot", expanded=False):
+        screenshot_workflow()
+    with st.expander("Open detailed valuation analytics", expanded=False):
+        valuation_dashboard()
+    with st.expander("Open valuation snapshot history", expanded=False):
         render_section_card("Valuation snapshots", "A durable Supabase history used for daily, weekly, monthly, and yearly comparisons.")
         if history.empty: render_empty_state("No snapshots yet", "Save today’s valuation from Analytics to begin your performance history.")
         else: st.dataframe(history, width="stretch", hide_index=True)
@@ -731,7 +738,7 @@ def _replace_asset(dataset: str, isin: str, updated: dict):
     recompute_models()
 
 
-def market_data_news_section():
+def _legacy_market_data_news_section():
     sentiment_state = st.session_state.sentiment
     missing_summary = _missing_data_frame()
     engine = MarketDataEngine(st.session_state.settings.get("scraping_enabled", True),
@@ -739,15 +746,13 @@ def market_data_news_section():
     provider_rows = st.session_state.provider_status or engine.provider_status_rows(
         st.session_state.settings.get("news_enabled", True))
     live_sources = sum(str(row.get("Status")) == "Enabled" for row in provider_rows)
-    render_page_header("Market Data & News", "Live sources, identifier enrichment, repair workflows, and an evidence-ranked financial news feed.",
+    render_page_header("Market", "Live sources, identifier enrichment, repair workflows, and an evidence-ranked financial news feed.",
                        f"{live_sources} sources active")
     render_hero_summary("Market regime", sentiment_state.get("market_regime", "Neutral"),
                         sentiment_state.get("sentiment", "Neutral"),
                         f"{len(missing_summary)} assets need attention · Last refresh {st.session_state.last_price_fetch or 'not yet'}")
     render_alert("Web-scraped data may be incomplete or outdated. Confirm important facts from the issuer factsheet before investing.", "warning")
-    tabs = st.tabs(["Market Data Engine", "Internet Enrichment Center", "Candidate assets",
-                    "Market research", "Asset quality", "Latest market news", "Market sentiment",
-                    "Missing Data Repair Center", "Scraping audit"])
+    tabs = [st.container() for _ in range(9)]
     with tabs[0]:
         render_section_card("Market Data Engine", "Free/no-key providers are tried first. Optional providers stay quiet when no key exists.")
         provider_columns = st.columns(4)
@@ -866,6 +871,158 @@ def market_data_news_section():
         st.dataframe(audit, width="stretch", hide_index=True)
         st.download_button("Export enrichment audit CSV", audit.to_csv(index=False),
                            "enrichment_audit.csv", "text/csv")
+
+
+def market_data_news_section():
+    """Readable vertical Market workspace; advanced detail lives in expanders, not tabs."""
+    sentiment = st.session_state.sentiment
+    missing = _missing_data_frame()
+    engine = MarketDataEngine(st.session_state.settings.get("scraping_enabled", True),
+                              st.session_state.settings.get("rate_limit_seconds", .25))
+    providers = st.session_state.provider_status or engine.provider_status_rows(
+        st.session_state.settings.get("news_enabled", True))
+    active_sources = sum(str(row.get("Status")) == "Enabled" for row in providers)
+    render_page_header("Market", "Market-data health, missing-data repair, public news, sentiment, and candidate research.",
+                       "Live" if st.session_state.settings.get("live_enabled", True) else "Disabled")
+    render_hero_summary("Market regime", sentiment.get("market_regime", "Neutral"),
+                        sentiment.get("sentiment", "Neutral"),
+                        "Evidence is informational and never triggers broker activity.")
+    kpis = st.columns(5)
+    with kpis[0]: render_metric_card("Regime", sentiment.get("market_regime", "Neutral"), tone="info")
+    with kpis[1]: render_metric_card("Sentiment", sentiment.get("sentiment", "Neutral"), sentiment.get("confidence", "Low") + " confidence")
+    with kpis[2]: render_metric_card("Active sources", active_sources, f"of {len(providers)} configured", "positive")
+    with kpis[3]: render_metric_card("Missing items", len(missing), "Repair required" if len(missing) else "Complete", "warning" if len(missing) else "positive")
+    with kpis[4]: render_metric_card("Last refresh", st.session_state.last_price_fetch or "Not yet")
+
+    render_section_card("Main actions", "Refresh the evidence layer before reviewing repair suggestions or research rankings.")
+    action_a, action_b, action_c, action_d = st.columns(4)
+    if action_a.button("Refresh live prices", type="primary", use_container_width=True):
+        with st.spinner("Refreshing prices and FX..."): refresh_live_data(True)
+        st.toast("Live prices refreshed", icon="✓"); st.rerun()
+    if action_b.button("Enrich missing ISIN data", use_container_width=True):
+        with st.spinner("Running free identifier and metadata enrichment..."): _run_data_enrichment(True)
+        st.toast("Internet enrichment completed", icon="✓"); st.rerun()
+    if action_c.button("Fetch market news", use_container_width=True):
+        with st.spinner("Fetching public market news..."): _refresh_news_and_strategy(False)
+        st.toast("Market news refreshed", icon="✓"); st.rerun()
+    if action_d.button("Repair missing data", use_container_width=True, disabled=missing.empty):
+        with st.spinner("Trying all enabled repair sources..."): _run_data_enrichment(True)
+        st.toast("Missing-data repair completed", icon="✓"); st.rerun()
+
+    render_section_card("1. Market Data Status", "Provider availability, key requirements, and the latest recorded provider outcome.")
+    provider_cols = st.columns(4)
+    for index, row in enumerate(providers):
+        with provider_cols[index % 4]:
+            enabled = row.get("Status") == "Enabled"
+            render_metric_card(row.get("Provider"), row.get("Status", "Unknown"), row.get("Purpose"),
+                               "positive" if enabled else "neutral")
+    with st.expander("Provider details and errors", expanded=False):
+        st.dataframe(pd.DataFrame(providers), width="stretch", hide_index=True)
+
+    render_section_card("2. Missing Data Repair", "Suggestions remain separate from entered facts until you explicitly accept or confirm them.")
+    repair_labels = ["Price symbol", "TER/cost", "Category", "Factsheet URL", "Conflicting metadata"]
+    repair_cols = st.columns(5)
+    missing_text = missing.get("Missing / repair needed", pd.Series(dtype=str)).fillna("")
+    for column, label in zip(repair_cols, repair_labels):
+        count = int(missing_text.str.contains(label, case=False, regex=False).sum())
+        with column: render_metric_card(label, count, "Needs attention" if count else "Complete", "warning" if count else "positive")
+    if missing.empty:
+        render_empty_state("No repair items", "The current holdings and candidate universe have no detected repair queue.")
+    else:
+        combined = pd.concat([st.session_state.holdings.assign(dataset="Holding"),
+                              st.session_state.candidates.assign(dataset="Candidate")], ignore_index=True, sort=False)
+        repair_rows = []
+        for _, item in missing.iterrows():
+            matches = combined[(combined["dataset"] == item["Dataset"]) &
+                               (combined["isin"].astype(str) == str(item["ISIN"]))]
+            asset = matches.iloc[0].to_dict() if not matches.empty else {}
+            audit = asset.get("enrichment_audit") if isinstance(asset.get("enrichment_audit"), list) else []
+            tried = ", ".join(dict.fromkeys(str(entry.get("provider", "")) for entry in audit if entry.get("provider"))) or "Not run yet"
+            suggestions = asset.get("enrichment_suggestions") if isinstance(asset.get("enrichment_suggestions"), dict) else {}
+            first = next(iter(suggestions.values()), {}) if suggestions else {}
+            repair_rows.append({"Asset": item["Instrument"], "ISIN": item["ISIN"],
+                                "Missing field": item["Missing / repair needed"], "Tried sources": tried,
+                                "Suggested value": first.get("value", ""),
+                                "Confidence": first.get("confidence", asset.get("web_scrape_confidence", "")),
+                                "Action": "Review suggestion" if suggestions else "Auto repair"})
+        st.dataframe(pd.DataFrame(repair_rows), width="stretch", hide_index=True)
+        selected = st.selectbox("Choose an asset to repair", missing["ISIN"].astype(str).tolist(), key="market_repair_asset",
+                                format_func=lambda value: missing.loc[missing["ISIN"].astype(str) == value, "Instrument"].iloc[0])
+        selected_summary = missing.loc[missing["ISIN"].astype(str) == selected].iloc[0]
+        dataset = selected_summary["Dataset"]
+        source_frame = st.session_state.holdings if dataset == "Holding" else st.session_state.candidates
+        asset = source_frame.loc[source_frame["isin"].astype(str) == selected].iloc[0].to_dict()
+        repair_a, repair_b = st.columns(2)
+        if repair_a.button("Auto repair selected asset", type="primary", use_container_width=True):
+            with st.spinner("Trying provider and web enrichment sources..."): _run_data_enrichment(True, selected)
+            st.rerun()
+        if repair_b.button("Retry public web search", use_container_width=True):
+            with st.spinner("Searching source-ranked public pages..."): _run_data_enrichment(True, selected)
+            st.rerun()
+        suggestions = asset.get("enrichment_suggestions") if isinstance(asset.get("enrichment_suggestions"), dict) else {}
+        if suggestions:
+            suggestion_field = st.selectbox("Suggested field", list(suggestions), key="market_suggestion_field")
+            render_alert(f"Suggested {suggestion_field}: {suggestions[suggestion_field].get('value')} · "
+                         f"{suggestions[suggestion_field].get('confidence', 'Unknown')} confidence", "info")
+            if st.button("Accept suggested value", key="market_accept_suggestion"):
+                _replace_asset(dataset, selected, accept_suggestion(asset, suggestion_field)); st.rerun()
+        with st.expander("Enter a value manually and mark it confirmed", expanded=False):
+            manual_fields = ["price_symbol", "ter_pct", "asset_type", "category", "factsheet_url",
+                             "scalable_compatible", "issuer", "currency"]
+            field = st.selectbox("Field", manual_fields, key="market_manual_field")
+            manual_value = st.text_input("Confirmed value", key="market_manual_value")
+            confirmed = st.checkbox("I verified this value", key="market_manual_confirmed")
+            if st.button("Save confirmed value", key="market_save_manual", disabled=not (manual_value and confirmed)):
+                updated = dict(asset)
+                if field == "ter_pct":
+                    try: updated[field] = float(manual_value.replace(",", "."))
+                    except ValueError: render_alert("Enter TER as a number, for example 0.20", "danger"); st.stop()
+                elif field == "scalable_compatible":
+                    updated[field] = manual_value.strip().lower() in {"true", "yes", "1", "confirmed"}
+                else: updated[field] = manual_value.strip()
+                updated["confirmed_by_user"] = True
+                _replace_asset(dataset, selected, updated); st.rerun()
+
+    render_section_card("3. Internet Enrichment", "Every identifier, price, FX, metadata, and safe web attempt is retained for review.")
+    audit = st.session_state.enrichment_audit
+    audit_cols = st.columns(3)
+    with audit_cols[0]: render_metric_card("Audit events", len(audit))
+    with audit_cols[1]: render_metric_card("Warnings", len(st.session_state.enrichment_warnings), tone="warning" if st.session_state.enrichment_warnings else "positive")
+    with audit_cols[2]: render_metric_card("Web enrichment", "Enabled" if st.session_state.settings.get("scraping_enabled") else "Disabled")
+    for warning in st.session_state.enrichment_warnings: render_alert(warning, "warning")
+    with st.expander("Open enrichment audit", expanded=False):
+        if audit.empty: render_empty_state("No enrichment audit yet", "Run enrichment to create the provider-by-provider evidence trail.")
+        else: st.dataframe(audit, width="stretch", hide_index=True)
+        st.download_button("Export enrichment audit CSV", audit.to_csv(index=False), "enrichment_audit.csv", "text/csv")
+
+    render_section_card("4. Latest Market News", "Public headlines ranked against your holdings, candidate assets, themes, and strategy.")
+    news = pd.DataFrame(st.session_state.news_items)
+    if news.empty:
+        render_empty_state("No market news cached", "Use Fetch market news to build the current feed.")
+    else:
+        categories = ["All"] + sorted(news.get("category", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+        selected_category = st.selectbox("News theme", categories, key="vertical_news_filter")
+        filtered = news if selected_category == "All" else news[news["category"] == selected_category]
+        for _, item in filtered.head(10).iterrows():
+            render_news_card(item.get("title"), item.get("source"), item.get("published_at"), item.get("sentiment"), item.get("url"))
+        with st.expander("News table", expanded=False):
+            columns = [column for column in ["title", "source", "published_at", "category", "sentiment", "confidence", "url"] if column in filtered]
+            st.dataframe(filtered[columns], width="stretch", hide_index=True,
+                         column_config={"url": st.column_config.LinkColumn("Link")})
+
+    render_section_card("5. Market Sentiment", "An explainable blend of public-news language and observed market momentum.")
+    sentiment_cols = st.columns(3)
+    with sentiment_cols[0]: render_metric_card("Sentiment", sentiment.get("sentiment", "Neutral"), tone="info")
+    with sentiment_cols[1]: render_metric_card("Regime", sentiment.get("market_regime", "Neutral"), tone="info")
+    with sentiment_cols[2]: render_metric_card("Confidence", sentiment.get("confidence", "Low"), tone="warning")
+    render_alert(sentiment.get("explanation", "Refresh market news to produce an explanation."), "info")
+    if st.button("Use current sentiment in strategy refresh"):
+        _refresh_news_and_strategy(True); st.toast("Strategy refreshed", icon="✓"); st.rerun()
+
+    render_section_card("6. Candidate Asset Research", "Edit the candidate universe first; open rankings and detailed quality only when needed.")
+    with st.expander("Candidate universe editor", expanded=False): candidate_universe()
+    with st.expander("Market research rankings", expanded=False): market_research_dashboard()
+    with st.expander("Detailed asset quality", expanded=False): asset_quality_dashboard()
 
 
 def strategy_section():
@@ -993,13 +1150,21 @@ def rebalance_section():
         if run["warnings"]: render_alert(run["run_status"] + ": " + "; ".join(run["warnings"]), "warning")
         else: st.toast("Full rebalance completed", icon="✓")
     render_rebalance_summary(st.session_state.recommendations)
-    tabs = st.tabs(["Portfolio recommendations", "Execution order", "Savings plans",
-                    "Allocation", "Recommendation report"])
-    with tabs[0]: rebalance_engine()
-    with tabs[1]: st.dataframe(recommendation_execution_order(st.session_state.recommendations), width="stretch", hide_index=True)
-    with tabs[2]: savings_plan_page()
-    with tabs[3]: st.dataframe(allocation_table(st.session_state.drift), width="stretch", hide_index=True)
-    with tabs[4]: recommendation_report_page()
+    rebalance_engine()
+    render_section_card("Execution order", "Sells first, then cash-limited buys; lower-priority actions are deferred when funding is insufficient.")
+    execution = recommendation_execution_order(st.session_state.recommendations)
+    if execution.empty: render_empty_state("No execution steps", "Run the full rebalance to create an ordered checklist.")
+    else: st.dataframe(execution[[column for column in ["Step", "Action", "Instrument", "Quantity", "Est. value", "Fee issue"] if column in execution]],
+                       width="stretch", hide_index=True)
+    savings_plan_page()
+    render_section_card("Manual Scalable checklist", "These rows must be reviewed and applied manually in Scalable Capital.")
+    manual_checklist = create_savings_plan_execution_checklist(st.session_state.plans, st.session_state.optimized_savings)
+    if manual_checklist.empty: render_empty_state("No savings-plan changes", "The current optimizer output does not require a manual plan update.")
+    else: st.dataframe(manual_checklist, width="stretch", hide_index=True)
+    render_section_card("Allocation before and after", "Current exposure against the target policy after considering the recommendation set.")
+    allocation_summary = allocation_table(st.session_state.drift)
+    st.dataframe(allocation_summary, width="stretch", hide_index=True)
+    with st.expander("Recommendation report and source detail", expanded=False): recommendation_report_page()
 
 
 def _save_master_run(results):
@@ -1111,24 +1276,23 @@ except SupabaseConnectionError as exc:
     render_alert("Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit secrets, then run supabase_schema.sql.", "info")
     st.stop()
 
-PAGES = ["Portfolio", "Market Data & News", "Strategy", "Rebalance", "Settings"]
+PAGES = ["Portfolio", "Market", "Strategy", "Rebalance", "Settings"]
 with st.sidebar:
     st.markdown('<div class="sidebar-brand"><div class="sidebar-title">Financial Hub</div>'
-                '<div class="sidebar-subtitle">Market-aware wealth manager</div></div>', unsafe_allow_html=True)
-    labels = {"Portfolio": "◫  Portfolio", "Market Data & News": "◉  Market",
-              "Strategy": "◇  Strategy", "Rebalance": "↻  Rebalance", "Settings": "⚙  Settings"}
-    page = st.radio("Navigation", PAGES, format_func=lambda item: labels[item])
-    market_status = "Live" if st.session_state.settings.get("live_enabled", True) else "Paused"
+                '<div class="sidebar-subtitle">Wealth command center</div></div>', unsafe_allow_html=True)
+    page = st.radio("Navigation", PAGES)
+    market_status = "Error" if st.session_state.enrichment_warnings else "Live" if st.session_state.settings.get("live_enabled", True) else "Disabled"
+    market_class = "danger-pill" if market_status == "Error" else "warning-pill" if market_status == "Disabled" else "info-pill"
     refresh_text = str(st.session_state.last_price_fetch or "Not yet")
     st.markdown(f'<div class="sidebar-status">'
                 f'<div class="sidebar-status-row"><span>Supabase</span><span class="success-pill status-pill">Connected</span></div>'
-                f'<div class="sidebar-status-row"><span>Market data</span><span class="info-pill status-pill">{market_status}</span></div>'
+                f'<div class="sidebar-status-row"><span>Market data</span><span class="{market_class} status-pill">{market_status}</span></div>'
                 f'<div class="sidebar-status-row"><span>Last refresh</span><span>{refresh_text}</span></div></div>',
                 unsafe_allow_html=True)
     render_alert("Decision support only. No broker connection or auto-trading.", "info")
     logout_button()
 
-{"Portfolio": portfolio_section, "Market Data & News": market_data_news_section,
+{"Portfolio": portfolio_section, "Market": market_data_news_section,
  "Strategy": strategy_section, "Rebalance": rebalance_section, "Settings": settings_page}[page]()
 st.markdown('<div class="privacy-footer">Private app · Data saved in Supabase · No broker connection · No auto-trading</div>',
             unsafe_allow_html=True)

@@ -35,3 +35,11 @@ def test_recommendation_card_handles_missing_fields_and_escapes_html(monkeypatch
     html = ui.render_recommendation_card(instrument="<Unknown>")
     assert rendered and "recommendation-card" in html
     assert "&lt;Unknown&gt;" in html and "No reason supplied" in html
+
+
+def test_concise_public_component_helpers(monkeypatch):
+    rendered = capture_markdown(monkeypatch)
+    ui.page_header("Market", "Readable evidence")
+    ui.action_card("Refresh", "Update market evidence", "Refresh now")
+    ui.progress_step("Prices", "Done")
+    assert len(rendered) == 3
