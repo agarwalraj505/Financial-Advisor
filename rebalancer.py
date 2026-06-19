@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 MIN_EFFICIENT_ORDER_EUR = 250.0
 MATERIAL_DRIFT_PCT = 3.0
 ON_TARGET_DRIFT_PCT = 1.0
-HOLDING_COLUMNS = ["instrument", "isin", "ticker_id", "price_symbol", "asset_type", "category", "quantity",
+HOLDING_COLUMNS = ["instrument", "isin", "ticker_id", "price_symbol", "asset_type", "category", "theme", "region", "quantity",
                    "manual_current_price", "live_current_price", "price_source", "currency", "fx_rate_to_eur",
                    "current_value_eur", "buy_in_value_eur", "pl_eur", "pl_pct",
                    "direct_trading_allowed", "fractional_allowed", "notes"]
@@ -24,6 +24,8 @@ class Holding(BaseModel):
     price_symbol: str = ""
     asset_type: str = "ETF"
     category: str = "Core"
+    theme: str = ""
+    region: str = ""
     quantity: float = Field(default=0, ge=0)
     manual_current_price: float = Field(default=0, ge=0)
     live_current_price: float = Field(default=0, ge=0)
@@ -56,6 +58,7 @@ def _normalise_holdings(data: pd.DataFrame) -> pd.DataFrame:
         if new not in frame and old in frame:
             frame[new] = frame[old]
     defaults = {"instrument": "", "isin": "", "ticker_id": "", "price_symbol": "", "asset_type": "ETF",
+                "theme": "", "region": "",
                 "category": "Uncategorised", "quantity": 0.0, "manual_current_price": 0.0,
                 "live_current_price": 0.0, "price_source": "Manual fallback", "currency": "EUR",
                 "fx_rate_to_eur": 1.0, "current_value_eur": 0.0, "buy_in_value_eur": 0.0,
@@ -64,7 +67,7 @@ def _normalise_holdings(data: pd.DataFrame) -> pd.DataFrame:
     for column, default in defaults.items():
         if column not in frame:
             frame[column] = default
-    string_columns = ["instrument", "isin", "ticker_id", "price_symbol", "asset_type", "category",
+    string_columns = ["instrument", "isin", "ticker_id", "price_symbol", "asset_type", "category", "theme", "region",
                       "price_source", "currency", "notes"]
     for column in string_columns:
         frame[column] = frame[column].fillna("").astype(str)

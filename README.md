@@ -1,80 +1,163 @@
-# Scalable Capital Wealth Portfolio Rebalancer
+# Market-Aware Wealth Manager — Streamlit Cloud + Supabase
 
-A local Streamlit valuation dashboard and explainable portfolio-rebalancing tool for a Germany-based Scalable Capital investor. It uses manually entered holdings plus optional Yahoo Finance estimates. It never signs in to Scalable Capital, connects to a broker account, or places trades. This is decision support, not financial advice.
+A production-style Streamlit decision-support application for portfolio valuation, market research, candidate selection, rebalancing, and savings-plan optimization.
 
-## Privacy and price warning
+The deployed app runs at a `streamlit.app` URL. Supabase Postgres stores portfolio data permanently and a private Supabase Storage bucket stores optional screenshots. The app never connects to Scalable Capital, never places orders, and never auto-trades. Internet prices are estimates; check the final live price manually in Scalable Capital before execution.
 
-- Screenshots remain on your computer in `data/uploads/`.
-- Personal holdings remain in `data/portfolio_data.json` after you click **Save portfolio**.
-- Daily snapshots remain in `data/valuation_history.csv`.
-- All three paths are excluded from Git. Do not remove those `.gitignore` rules.
-- Holdings and screenshots are never sent to Yahoo Finance. Only the individual **Price Symbol** strings are requested.
-- Free internet quotes can be delayed, unavailable, in another currency, or different from the price at your venue. **Scalable Capital's live buy/sell prices are final for order execution.**
+## Architecture
 
-## Beginner setup on Windows
+- Streamlit frontend hosted by Streamlit Community Cloud
+- Private GitHub repository for code only
+- Supabase Postgres for holdings, candidates, plans, snapshots, recommendations, and settings
+- Private Supabase Storage bucket for screenshots
+- yfinance market-data adapter with manual-price fallback
+- `st.secrets` for credentials and the password gate
+- Pure Python valuation/scoring/optimizer modules covered by pytest
 
-1. Install Python 3.11 or newer from [python.org](https://www.python.org/downloads/). Select **Add Python to PATH** during setup.
-2. Open this project folder in File Explorer, click the address bar, type `powershell`, and press Enter.
-3. Install dependencies:
+No production portfolio data is written to local JSON or CSV. CSV is used only for browser import/export.
 
-   ```powershell
-   python -m pip install -r requirements.txt
-   ```
+## Online deployment
 
-4. Start the local app:
+### 1. Create a private GitHub repository
 
-   ```powershell
-   python -m streamlit run app.py
-   ```
+Create an empty private repository on GitHub. Do not add portfolio files, screenshots, `.env`, or `secrets.toml`.
 
-5. Stop it later with `Ctrl+C` in PowerShell.
+### 2. Push the code to GitHub
 
-## First valuation, step by step
+From this project folder:
 
-1. Open **Manual Holdings Table** and add or correct your holdings. You can also use **Upload Holdings Screenshots** as a local visual reference and confirm the values manually.
-2. Add a Yahoo Finance **Price Symbol** for each market-traded holding. Symbols often include an exchange suffix, such as `.DE` or `.L`; verify that the result is the exact instrument and listing you own.
-3. Enter a reliable **Manual current price** and currency. This is the fallback if the internet quote fails.
-4. Open **Valuation Dashboard** and click **Refresh live prices**.
-5. Review price sources, currencies, FX rates, warnings, charts, and insights. A row is marked `Live`, `Manual fallback`, or `Missing`.
-6. Click **Save today's valuation snapshot** once per day. Saving again on the same day replaces that day's snapshot.
-7. Daily gain compares with the latest prior-day snapshot. Weekly, monthly, and yearly gains compare with the snapshots closest to 7, 30, and 365 days ago. Until a prior snapshot exists, the card says **Not enough history yet**.
+```powershell
+git add .
+git commit -m "Deploy market-aware wealth manager"
+git branch -M main
+git remote add origin https://github.com/YOUR-NAME/YOUR-PRIVATE-REPO.git
+git push -u origin main
+```
+
+Review `git status` first. The repository should contain source code and `supabase_schema.sql`, but not `data/`, uploads, personal CSVs, `.env`, or `.streamlit/secrets.toml`.
+
+### 3. Create a Supabase project
+
+Create a project at [supabase.com](https://supabase.com). Choose a strong database password and a nearby EU region where appropriate. Wait for provisioning to finish.
+
+### 4. Run the database schema
+
+In Supabase, open **SQL Editor**, create a query, paste the complete contents of `supabase_schema.sql`, and run it once. This creates:
+
+- `profiles`
+- `holdings`
+- `candidate_assets`
+- `savings_plans`
+- `valuation_snapshots`
+- `recommendations`
+- `app_settings`
+- private `holdings-screenshots` Storage bucket
+- indexes, unique constraints, and row-level security policies
+
+The MVP uses a password-derived pseudonymous `x-user-id` header. RLS permits access only to rows and screenshot folders matching that identifier. Before supporting multiple people, replace the password gate with Supabase Auth or Streamlit OIDC and use `auth.uid()` policies.
+
+### 5. Copy the Supabase URL and anon key
+
+Open the Supabase project API settings and copy:
+
+- Project URL
+- Anon/publishable key
+
+Never use or commit the service-role key. The app needs only the anon key.
+
+### 6. Create the Streamlit Community Cloud app
+
+Sign in at [share.streamlit.io](https://share.streamlit.io), select **Create app**, connect GitHub, choose the private repository and `main` branch, and set the main file to `app.py`.
+
+### 7. Add Streamlit secrets
+
+In the app's **Advanced settings → Secrets**, add:
+
+```toml
+SUPABASE_URL = "https://YOUR-PROJECT.supabase.co"
+SUPABASE_ANON_KEY = "YOUR-ANON-KEY"
+APP_PASSWORD = "USE-A-LONG-RANDOM-PASSWORD"
+```
+
+Do not place these values in source code. An optional stable identifier can be supplied as `APP_USER_ID`; otherwise one is derived from `APP_PASSWORD`. If no `APP_USER_ID` is set, changing `APP_PASSWORD` changes the derived data scope, so existing rows will appear inaccessible until migrated.
+
+### 8. Deploy
+
+Click **Deploy**. Community Cloud installs `requirements.txt`, starts `app.py`, and displays build logs. If setup is incomplete, the app gives a readable missing-secret or database error instead of writing data locally.
+
+### 9. Open the online URL
+
+Open the generated `https://YOUR-APP.streamlit.app` URL and enter `APP_PASSWORD`. No localhost is required after deployment.
+
+### 10. Add holdings and save
+
+Open **Current Portfolio**, enter or import holdings, and click **Save portfolio to Supabase**. Data remains available after closing the browser. Use **Candidate Universe**, **Savings Plan Optimizer**, and **Settings** to save their corresponding data.
+
+### 11. Refresh live prices
+
+Click **Refresh market data**. yfinance supplies estimated latest prices, previous close, histories, returns, volatility, drawdown, moving-average comparisons, and trend status. Failed prices use a manual holding price when available and show a warning.
+
+### 12. Save a valuation snapshot
+
+Open **Valuation Dashboard** and click **Save today's valuation snapshot**. Supabase upserts one snapshot per user and date. Daily, weekly, monthly, and yearly gains compare current value with the closest prior snapshot. Missing periods show **Not enough history yet**.
+
+## Secrets for local development
+
+Local development is optional. Create `.streamlit/secrets.toml` only on your own machine:
+
+```toml
+SUPABASE_URL = "https://YOUR-PROJECT.supabase.co"
+SUPABASE_ANON_KEY = "YOUR-ANON-KEY"
+APP_PASSWORD = "YOUR-PASSWORD"
+```
+
+Then run:
+
+```powershell
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
+```
+
+The secrets file is ignored by Git.
 
 ## Pages
 
-- **Dashboard:** current totals, category allocation, targets, and drift.
-- **Valuation Dashboard:** live/manual valuation, period gains, Plotly charts, insights, snapshots, and history export.
-- **Upload Holdings Screenshots:** stores local screenshots and supports manual confirmation; no OCR or cloud upload.
-- **Manual Holdings Table:** add, edit, delete, save, reset, and export holdings.
-- **Rebalance Report:** immediate actions, sells-before-buys execution order, savings-plan adjustments, allocation, notes, and CSV exports.
-- **Savings Plans:** editable monthly plans and simple drift-based suggestions.
-- **Settings:** base currency, refresh interval, live-price toggle, targets, fee threshold, and cash range.
+1. Dashboard
+2. Valuation Dashboard
+3. Current Portfolio
+4. Upload Holdings Screenshots
+5. Candidate Universe
+6. Market Research Dashboard
+7. Asset Quality Dashboard
+8. Rebalance Engine
+9. Savings Plan Optimizer
+10. Recommendation Report
+11. Settings
 
-## How live valuation works
+## Scoring and safeguards
 
-`market_data.py` asks yfinance for the latest price, previous close, currency, and 5-day/1-month/1-year daily histories. Non-EUR quotes use a Yahoo Finance FX estimate. `valuation.py` applies:
+Total score uses momentum 25%, asset quality 25%, cost 15%, portfolio fit 25%, and risk control 10%.
 
-```text
-value EUR = quantity × selected price × FX rate to EUR
-```
+- 8.0–10: eligible for buy/add only with complete critical data
+- 6.5–7.9: watchlist only
+- Below 6.5: avoid/no buy
+- Missing Price Symbol, TER, fund size, or spread for fund products: manual review only
 
-The live price is selected when available. Otherwise the manual price is retained and the app warns: **Live price unavailable, using manual price.** Results are cached for the refresh interval configured in Settings. The last successful quote timestamp is shown on the valuation page.
+Recommendations show source, timestamp, reason, confidence, fee context, and **Check live Scalable price before execution**. Stocks, ETFs, ETCs, and ETPs use whole quantities; crypto may be fractional. Direct orders below €250 normally defer to savings plans and show the assumed €1.98 round-trip fee. EIX/gettex is preferred; avoid Xetra unless specifically needed.
 
-Historical portfolio charts approximate past value using today's quantities; they are not transaction-aware performance or tax records. Snapshot gains also reflect deposits, withdrawals, and quantity changes, not just market movement.
+## Privacy and security notes
 
-## Rebalancing assumptions
-
-- Preferred venue: EIX/gettex; avoid Xetra unless explicitly needed.
-- Whole units for stocks, ETFs, ETCs, and ETPs; crypto may be fractional.
-- Direct orders below the configurable €250 default threshold are normally avoided.
-- A sub-threshold order warns about €0.99 buy plus €0.99 sell, or €1.98 round trip.
-- No auto-trading or broker connection exists.
+- `.env`, `.streamlit/secrets.toml`, `data/`, `uploads/`, personal CSVs, caches, and bytecode are ignored.
+- Supabase queries are filtered by `user_id`, and RLS independently checks the pseudonymous request header.
+- Screenshots use a private bucket and user-specific folder policy.
+- The password is compared server-side and is never stored in the database.
+- This MVP is single-user. Use Supabase Auth or Streamlit OIDC before sharing access with multiple users.
+- Rotate exposed credentials immediately. Never use a service-role key in this app.
 
 ## Tests
-
-Run:
 
 ```powershell
 python -m pytest -q
 ```
 
-Tests cover totals, allocation, drift, fees, local persistence, yfinance adapter behavior, live/manual valuation, EUR and non-EUR conversion, period gains, missing history, and insight generation.
+Tests run without real Supabase credentials. They cover database payloads and user scoping, private screenshot paths, valuation and snapshot gains, scoring, missing-data watchlist enforcement, savings-plan budgets, optimizer execution order, and sub-€250 fee warnings.

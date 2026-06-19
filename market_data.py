@@ -10,6 +10,15 @@ import pandas as pd
 import yfinance as yf
 
 
+class MarketDataAdapter:
+    """Small provider contract so paid APIs can be added without changing scoring."""
+
+    name = "Base adapter"
+
+    def fetch(self, symbol: str) -> "MarketQuote":
+        raise NotImplementedError
+
+
 def normalise_currency(currency: str) -> str:
     """Preserve Yahoo's GBp (pence) distinction instead of treating it as GBP."""
     raw = str(currency or "").strip()
@@ -103,3 +112,36 @@ def fetch_fx_rate_to_eur(currency: str) -> tuple[float | None, str]:
     if currency in {"GBX", "GBPENCE"}:
         rate /= 100.0
     return rate, ""
+
+
+class YFinanceAdapter(MarketDataAdapter):
+    name = "Yahoo Finance via yfinance"
+
+    def fetch(self, symbol: str) -> MarketQuote:
+        return fetch_market_quote(symbol)
+
+
+class ManualFallbackAdapter(MarketDataAdapter):
+    name = "Manual fallback"
+
+    def __init__(self, prices: dict[str, float], currency: str = "EUR"):
+        self.prices, self.currency = prices, currency
+
+    def fetch(self, symbol: str) -> MarketQuote:
+        price = self.prices.get(symbol)
+        return MarketQuote(symbol=symbol, latest_price=price, currency=self.currency,
+                           error="Manual price unavailable" if not price else "")
+
+
+class PaidMarketDataAdapter(MarketDataAdapter):
+    """Extension point. Deliberately has no provider or network implementation."""
+
+    name = "Paid provider (not configured)"
+
+    def fetch(self, symbol: str) -> MarketQuote:
+        return MarketQuote(symbol=symbol, error="Paid market-data adapter is not configured")
+
+
+def openfigi_mapping_payload(identifier: str, id_type: str = "ID_ISIN") -> list[dict[str, str]]:
+    """Build an optional OpenFIGI request payload without transmitting personal data."""
+    return [{"idType": id_type, "idValue": str(identifier).strip()}]

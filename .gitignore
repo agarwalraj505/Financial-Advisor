@@ -1,7 +1,9 @@
+.env
+.streamlit/secrets.toml
+data/
+uploads/
+*.csv
 __pycache__/
 .pytest_cache/
 *.py[cod]
 .venv/
-data/uploads/
-data/portfolio_data.json
-data/valuation_history.csv
