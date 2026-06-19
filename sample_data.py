@@ -16,13 +16,13 @@ def holding(instrument, isin, ticker, price_symbol, asset_type, category, quanti
 
 
 SAMPLE_HOLDINGS = [
-    holding("Scalable MSCI AC World Xtrackers UCITS ETF", "LU2903252349", "ACWI", "", "ETF", "Core", 61, 724.56, 680),
+    holding("Scalable MSCI AC World Xtrackers UCITS ETF", "LU2903252349", "ACWI", "SCWX.DE", "ETF", "Core", 61, 724.56, 680),
     holding("iShares Core MSCI EM IMI UCITS ETF", "IE00BKM4GZ66", "EIMI", "EIMI.L", "ETF", "EM", 9, 452.84, 430),
-    holding("EUWAX Gold II", "DE000EWG2LD7", "EWG2", "EWG2.DE", "ETC", "Commodities", 2, 240.94, 220),
+    holding("EUWAX Gold II", "DE000EWG2LD7", "EWG2", "EWG2.SG", "ETC", "Commodities", 2, 240.94, 220),
     holding("Xtrackers Artificial Intelligence & Big Data UCITS ETF", "IE00BGV5VN51", "XAIX", "XAIX.DE", "ETF", "Growth", 1, 216.32, 195),
-    holding("VanEck Semiconductor UCITS ETF", "IE00BMC38736", "SMH", "VVSM.DE", "ETF", "Growth", 2, 216.16, 190),
+    holding("VanEck Semiconductor UCITS ETF", "IE00BMC38736", "SMH", "IE00BMC38736.SG", "ETF", "Growth", 2, 216.16, 190),
     holding("HANetf Future of Defence UCITS ETF", "IE000OJ5TQP4", "NATO", "ASWC.DE", "ETF", "Defence", 8, 141.58, 125),
-    holding("WisdomTree Physical Crypto Mega Cap", "GB00BMTP1626", "WCRP", "WCRP.DE", "ETP", "Crypto", 14, 59.55, 65, True),
+    holding("WisdomTree Physical Crypto Mega Cap", "GB00BMTP1626", "WCRP", "GB00BMTP1626.SG", "ETP", "Crypto", 14, 59.55, 65, True),
     holding("Cash", "CASH", "CASH", "", "Cash", "Cash", 1, 70.46, 70.46, True),
 ]
 

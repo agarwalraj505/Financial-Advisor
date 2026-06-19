@@ -1,7 +1,7 @@
 import pandas as pd
 
 import market_data
-from market_data import MarketQuote, fetch_fx_rate_to_eur, fetch_market_quote
+from market_data import MarketQuote, fetch_fx_rate_to_eur, fetch_market_quote, normalise_currency
 
 
 class FakeTicker:
@@ -41,3 +41,7 @@ def test_usd_fx_conversion_uses_inverse_eurusd_quote(monkeypatch):
 
 def test_eur_fx_rate_is_one():
     assert fetch_fx_rate_to_eur("EUR") == (1.0, "")
+
+
+def test_yahoo_gbp_pence_currency_is_preserved():
+    assert normalise_currency("GBp") == "GBX"

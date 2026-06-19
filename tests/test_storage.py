@@ -1,6 +1,7 @@
 import pandas as pd
 
-from storage import load_portfolio, save_portfolio, save_uploaded_file
+from storage import (clear_valuation_history, load_portfolio, load_valuation_history,
+                     save_portfolio, save_uploaded_file, save_valuation_snapshot)
 
 
 def test_save_and_load_portfolio_round_trip(tmp_path):
@@ -25,3 +26,16 @@ def test_uploaded_file_is_saved_locally_with_safe_name(tmp_path):
     assert saved.parent == tmp_path
     assert saved.name == "private_screenshot.png"
     assert saved.read_bytes() == b"image bytes"
+
+
+def test_daily_snapshot_replaces_same_day_and_can_be_cleared(tmp_path):
+    path = tmp_path / "valuation_history.csv"
+    first = {"date": "2026-06-19", "timestamp": "2026-06-19T09:00:00+02:00", "total_value_eur": 100}
+    second = {"date": "2026-06-19", "timestamp": "2026-06-19T18:00:00+02:00", "total_value_eur": 110}
+    save_valuation_snapshot(first, path)
+    save_valuation_snapshot(second, path)
+    history = load_valuation_history(path)
+    assert len(history) == 1
+    assert history.loc[0, "total_value_eur"] == 110
+    clear_valuation_history(path)
+    assert load_valuation_history(path).empty

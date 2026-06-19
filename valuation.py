@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
-from market_data import MarketQuote
+from market_data import MarketQuote, normalise_currency
 
 
 def calculate_position_value(quantity: float, price: float, fx_rate_to_eur: float = 1.0) -> float:
@@ -29,7 +29,7 @@ def valuate_holdings(
         quantity = float(row.get("quantity", 0) or 0)
         quote = quotes.get(symbol)
         live = float(quote.latest_price) if quote and quote.is_available else 0.0
-        currency = (quote.currency if quote and quote.currency else str(row.get("currency", "") or "EUR")).upper()
+        currency = normalise_currency(quote.currency if quote and quote.currency else row.get("currency", "") or "EUR")
         fx_rate = float(fx_rates.get(currency, row.get("fx_rate_to_eur", 1) or 1))
         if live > 0:
             price, source = live, "Live"
@@ -56,15 +56,16 @@ def valuate_holdings(
 def portfolio_market_history(holdings: pd.DataFrame, quotes: dict[str, MarketQuote]) -> pd.DataFrame:
     """Approximate 1-year portfolio value using current quantities and historical closes."""
     series = []
-    cash = 0.0
+    static_value = 0.0
     for _, row in holdings.iterrows():
         if str(row.get("category", "")) == "Cash":
-            cash += float(row.get("current_value_eur", 0) or 0)
+            static_value += float(row.get("current_value_eur", 0) or 0)
             continue
         symbol = str(row.get("price_symbol", "") or "")
         quote = quotes.get(symbol)
         history = quote.histories.get("1y") if quote else None
         if history is None or history.empty or "Close" not in history:
+            static_value += float(row.get("current_value_eur", 0) or 0)
             continue
         close = pd.to_numeric(history["Close"], errors="coerce").dropna()
         close.index = pd.to_datetime(close.index).tz_localize(None)
@@ -73,7 +74,7 @@ def portfolio_market_history(holdings: pd.DataFrame, quotes: dict[str, MarketQuo
     if not series:
         return pd.DataFrame(columns=["date", "portfolio_value_eur", "daily_gain_eur"])
     combined = pd.concat(series, axis=1).ffill().dropna(how="all")
-    total = combined.sum(axis=1) + cash
+    total = combined.sum(axis=1) + static_value
     return pd.DataFrame({"date": total.index, "portfolio_value_eur": total.values,
                          "daily_gain_eur": total.diff().fillna(0).values})
 

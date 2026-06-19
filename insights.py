@@ -26,6 +26,8 @@ def generate_insights(
         frame["daily_gain_eur"] = 0.0
     frame["daily_gain_eur"] = pd.to_numeric(frame["daily_gain_eur"], errors="coerce").fillna(0.0)
     daily = frame
+    if "previous_close" in frame and (pd.to_numeric(frame["previous_close"], errors="coerce").fillna(0) > 0).any():
+        daily = frame[pd.to_numeric(frame["previous_close"], errors="coerce").fillna(0) > 0]
     if not daily.empty:
         winner, loser = daily.loc[daily["daily_gain_eur"].idxmax()], daily.loc[daily["daily_gain_eur"].idxmin()]
         insights.append(f"Largest daily winner: {winner['instrument']} ({winner['daily_gain_eur']:+.2f} EUR).")

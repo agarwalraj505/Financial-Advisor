@@ -64,6 +64,14 @@ def _normalise_holdings(data: pd.DataFrame) -> pd.DataFrame:
     for column, default in defaults.items():
         if column not in frame:
             frame[column] = default
+    string_columns = ["instrument", "isin", "ticker_id", "price_symbol", "asset_type", "category",
+                      "price_source", "currency", "notes"]
+    for column in string_columns:
+        frame[column] = frame[column].fillna("").astype(str)
+    frame["currency"] = frame["currency"].replace("", "EUR")
+    frame["price_source"] = frame["price_source"].replace("", "Manual fallback")
+    for column, default in (("direct_trading_allowed", True), ("fractional_allowed", False)):
+        frame[column] = frame[column].fillna(default).astype(bool)
     for column in ["quantity", "manual_current_price", "live_current_price", "fx_rate_to_eur",
                    "current_value_eur", "buy_in_value_eur", "pl_eur", "pl_pct"]:
         frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)

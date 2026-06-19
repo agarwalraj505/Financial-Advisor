@@ -10,6 +10,14 @@ import pandas as pd
 import yfinance as yf
 
 
+def normalise_currency(currency: str) -> str:
+    """Preserve Yahoo's GBp (pence) distinction instead of treating it as GBP."""
+    raw = str(currency or "").strip()
+    if raw == "GBp" or raw.upper() in {"GBX", "GBPENCE"}:
+        return "GBX"
+    return raw.upper()
+
+
 @dataclass
 class MarketQuote:
     symbol: str
@@ -56,7 +64,7 @@ def fetch_market_quote(symbol: str) -> MarketQuote:
         fast_info = ticker.fast_info
         quote.latest_price = _fast_info_value(fast_info, "last_price") or _last_close(histories["5d"])
         quote.previous_close = _fast_info_value(fast_info, "previous_close")
-        quote.currency = str(_fast_info_value(fast_info, "currency") or "").upper()
+        quote.currency = normalise_currency(_fast_info_value(fast_info, "currency"))
         if quote.previous_close is None:
             closes = pd.to_numeric(histories["5d"].get("Close"), errors="coerce").dropna()
             if len(closes) >= 2:
@@ -70,7 +78,7 @@ def fetch_market_quote(symbol: str) -> MarketQuote:
 
 
 def fx_symbol_for_currency(currency: str) -> str:
-    currency = str(currency or "").upper()
+    currency = normalise_currency(currency)
     if currency in {"EUR", ""}:
         return ""
     if currency == "GBP":
@@ -82,7 +90,7 @@ def fx_symbol_for_currency(currency: str) -> str:
 
 def fetch_fx_rate_to_eur(currency: str) -> tuple[float | None, str]:
     """Return EUR per unit of quote currency using Yahoo's foreign-units-per-EUR pair."""
-    currency = str(currency or "").upper()
+    currency = normalise_currency(currency)
     if currency == "EUR":
         return 1.0, ""
     symbol = fx_symbol_for_currency(currency)
