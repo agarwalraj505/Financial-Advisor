@@ -47,11 +47,13 @@ class SupabaseGateway:
         return query
 
     def select(self, table: str, filters=None, columns: str = "*", order: str | None = None,
-               desc: bool = False) -> list[dict]:
+               desc: bool = False, limit: int | None = None) -> list[dict]:
         try:
             query = self._filters(self.client.table(table).select(columns), filters)
             if order:
                 query = query.order(order, desc=desc)
+            if limit:
+                query = query.limit(limit)
             return query.execute().data or []
         except Exception as exc:
             raise SupabaseConnectionError(f"Could not read {table}: {exc}") from exc

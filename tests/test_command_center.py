@@ -144,6 +144,7 @@ def test_scraper_failure_does_not_raise(monkeypatch):
 
 def test_news_provider_failure_does_not_raise(monkeypatch):
     monkeypatch.setattr("news_provider._read_rss", lambda *args: [])
+    monkeypatch.setattr("news_provider.get_gdelt_news", lambda *args, **kwargs: [])
     get_market_news.clear()
     assert get_market_news() == []
 

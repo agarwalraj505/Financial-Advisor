@@ -11,17 +11,19 @@ from asset_quality import assess_asset_readiness
 from enrichment_audit import audit_event
 from metadata_enrichment import merge_provider_data, suggested_symbol_candidates
 from providers import (CoinGeckoProvider, ECBProvider, FMPProvider, OpenFIGIProvider,
-                       TwelveDataProvider, YFinanceProvider)
+                       StooqProvider, TwelveDataProvider, YFinanceProvider)
 from web_scraper import scrape_asset_metadata
 
 CRYPTO_SYMBOLS = {"bitcoin": "BTC-EUR", "ethereum": "ETH-EUR", "solana": "SOL-EUR"}
 
 
 class MarketDataEngine:
-    def __init__(self, scraping_enabled: bool = True, rate_limit_seconds: float = .25):
+    def __init__(self, scraping_enabled: bool = True, rate_limit_seconds: float = .25,
+                 retry_queue=None, event_sink=None):
         self.yahoo = YFinanceProvider(); self.openfigi = OpenFIGIProvider()
         self.ecb = ECBProvider(self.yahoo); self.coingecko = CoinGeckoProvider()
         self.fmp = FMPProvider(); self.twelve = TwelveDataProvider()
+        self.stooq = StooqProvider(); self.retry_queue = retry_queue; self.event_sink = event_sink
         self.scraping_enabled = scraping_enabled
         self.rate_limit_seconds = max(0, float(rate_limit_seconds))
         self.audit: list[dict] = []; self.warnings: list[str] = []
@@ -38,15 +40,38 @@ class MarketDataEngine:
         return rows
 
     def _record(self, asset, result, action):
+        if self.event_sink:
+            self.event_sink({"asset": asset.get("instrument") or asset.get("isin", ""),
+                             "provider": result.provider, "source": action,
+                             "status": "Done" if result.success else "Failed",
+                             "error": result.error})
         self.audit.append(audit_event(asset, result.provider, action, result.success,
                                       result.error or str(result.data), confidence=result.confidence))
+        if (not result.success and self.retry_queue
+                and str(result.error or "") != "Retry cooldown active"):
+            error_lower = str(result.error or "").lower()
+            error_type = ("Rate limited" if result.status_code == 429 else "Provider timeout"
+                          if "timeout" in error_lower or "timed out" in error_lower else "Provider failure")
+            self.retry_queue.record_failure(result.provider, asset, action,
+                                            error_type,
+                                            result.error or "No verified result")
         if result.status_code == 429:
             warning = "OpenFIGI unauthenticated rate limit reached; remaining assets continue through yfinance/web enrichment."
             if warning not in self.warnings: self.warnings.append(warning)
 
+    def _can_try(self, provider: str, asset: dict) -> bool:
+        if not self.retry_queue:
+            return True
+        key = str(asset.get("isin") or asset.get("instrument") or "")
+        return self.retry_queue.can_retry(provider, key)
+
     def _symbol_candidates(self, asset: dict, figi_data: dict | None) -> list[str]:
         candidates = suggested_symbol_candidates(asset, figi_data)
+        if str(asset.get("price_symbol", "") or "").strip():
+            return list(dict.fromkeys(candidate for candidate in candidates if candidate))[:8]
         query = str(asset.get("isin") or asset.get("instrument") or "")
+        if not self._can_try(self.yahoo.name, asset):
+            return list(dict.fromkeys(candidate for candidate in candidates if candidate))[:8]
         search = self.yahoo.search(query)
         self._record(asset, search, "symbol search")
         if search.success:
@@ -67,6 +92,14 @@ class MarketDataEngine:
                            "last_auto_repair_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
             return output
         isin = str(output.get("isin", "") or "").strip()
+        if not isin and output.get("instrument"):
+            name_match = (self.openfigi.search_name(str(output["instrument"]))
+                          if self._can_try(self.openfigi.name, output)
+                          else self.openfigi.failure("Retry cooldown active"))
+            self._record(output, name_match, "name search")
+            if name_match.success:
+                figi_data = name_match.data
+                output = merge_provider_data(output, name_match.data, name_match.provider, name_match.confidence, self.audit)
         if not isin and self.scraping_enabled and output.get("instrument"):
             preliminary = scrape_asset_metadata(output)
             output.update({key: value for key, value in preliminary.items() if key in
@@ -78,7 +111,9 @@ class MarketDataEngine:
                                           bool(isin), "Identifier candidate found" if isin else "No identifier found",
                                           confidence=isin_suggestion.get("confidence", "Low")))
         if isin and isin != "CASH":
-            figi = self.openfigi.map_isin(isin); self._record(output, figi, "ISIN mapping")
+            figi = (self.openfigi.map_isin(isin) if self._can_try(self.openfigi.name, output)
+                    else self.openfigi.failure("Retry cooldown active"))
+            self._record(output, figi, "ISIN mapping")
             if figi.success:
                 figi_data = figi.data
                 output = merge_provider_data(output, figi.data, figi.provider, figi.confidence, self.audit)
@@ -86,12 +121,21 @@ class MarketDataEngine:
         output["suggested_price_symbols"] = candidates
         live = None; selected_symbol = str(output.get("price_symbol", "") or "")
         ordered_symbols = ([selected_symbol] if selected_symbol else []) + [item for item in candidates if item != selected_symbol]
-        for symbol in ordered_symbols:
-            result = self.yahoo.get_price(symbol); self._record(output, result, f"price attempt {symbol}")
-            if result.success:
-                live, selected_symbol = result, symbol; break
-            time.sleep(self.rate_limit_seconds)
-        if not live and str(output.get("category", "")).lower() == "crypto":
+        if self._can_try(self.yahoo.name, output):
+            for symbol in ordered_symbols:
+                if not self._can_try(self.yahoo.name, output): break
+                result = self.yahoo.get_price(symbol); self._record(output, result, f"price attempt {symbol}")
+                if result.success:
+                    live, selected_symbol = result, symbol; break
+                time.sleep(self.rate_limit_seconds)
+        if not live and self._can_try(self.stooq.name, output):
+            for symbol in ordered_symbols[:4]:
+                if not self._can_try(self.stooq.name, output): break
+                result = self.stooq.get_price(symbol); self._record(output, result, f"Stooq price attempt {symbol}")
+                if result.success:
+                    live, selected_symbol = result, symbol; break
+        if (not live and str(output.get("category", "")).lower() == "crypto"
+                and self._can_try(self.coingecko.name, output)):
             coin_id = next((coin for coin in CRYPTO_SYMBOLS if coin in str(output.get("instrument", "")).lower()), "")
             crypto = self.coingecko.get_price_eur(coin_id); self._record(output, crypto, "crypto fallback")
             if crypto.success: live = crypto; selected_symbol = selected_symbol or CRYPTO_SYMBOLS.get(coin_id, "")
@@ -101,10 +145,14 @@ class MarketDataEngine:
             output.update({"live_current_price": price, "latest_price": price, "currency": currency,
                            "price_source": live.provider, "data_source": live.provider,
                            "data_confidence": live.confidence, "last_updated": live.fetched_at})
-            metadata = self.yahoo.get_metadata(selected_symbol); self._record(output, metadata, "quote/fund metadata")
+            metadata = (self.yahoo.get_metadata(selected_symbol) if self._can_try(self.yahoo.name, output)
+                        else self.yahoo.failure("Retry cooldown active"))
+            self._record(output, metadata, "quote/fund metadata")
             if metadata.success: output = merge_provider_data(output, metadata.data, metadata.provider, metadata.confidence, self.audit)
         currency = str(output.get("currency", "EUR") or "EUR")
-        fx = self.ecb.get_rate_to_eur(currency); self._record(output, fx, "FX conversion")
+        fx = (self.ecb.get_rate_to_eur(currency) if self._can_try(self.ecb.name, output)
+              else self.ecb.failure("Retry cooldown active"))
+        self._record(output, fx, "FX conversion")
         if fx.success: output["fx_rate_to_eur"] = fx.data["fx_rate_to_eur"]
         manual = float(output.get("manual_current_price", 0) or 0)
         selected_price = float(output.get("live_current_price", 0) or output.get("latest_price", 0) or manual)

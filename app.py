@@ -1,6 +1,7 @@
 """Production-style Streamlit wealth manager backed by Supabase."""
 
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import time
 
 import pandas as pd
@@ -8,14 +9,20 @@ import plotly.express as px
 import streamlit as st
 
 from auth import logout_button, require_authentication
+from asset_quality import assess_asset_readiness
 from db import Database
-from market_data import get_fx_rate_to_eur, get_market_quote
+from coverage_engine import (DeepScanEngine, calculate_data_coverage,
+                             repair_missing_symbols as repair_symbol_batch)
+from data_cache import SupabaseDataCache
+from data_gap_report import generate_data_gap_report
+from market_data import MarketQuote, get_fx_rate_to_eur, get_market_quote
 from market_data_engine import MarketDataEngine
 from market_research import build_market_research
 from master_rebalance import run_full_rebalance_pipeline
 from metadata_enrichment import accept_suggestion
-from news_provider import get_market_news, rank_news_by_relevance
+from news_provider import deduplicate_news, get_asset_news, get_market_news, rank_news_by_relevance
 from optimizer import generate_market_aware_recommendations, recommendation_execution_order
+from provider_registry import get_provider_registry
 from recommendation_engine import build_recommendation_report
 from rebalancer import (allocation_table, calculate_allocation, calculate_drift, calculate_total_invested,
                         calculate_total_value, calculate_unrealised_pl, holdings_to_dataframe,
@@ -23,6 +30,7 @@ from rebalancer import (allocation_table, calculate_allocation, calculate_drift,
 from sample_data import (CANDIDATE_COLUMNS, SAMPLE_CANDIDATES, SAMPLE_HOLDINGS, SAMPLE_SAVINGS_PLANS,
                          SUPPORTED_CATEGORIES, TARGET_ALLOCATIONS)
 from savings_plan_optimizer import optimize_savings_plans
+from retry_queue import RetryQueue
 from savings_plan_manager import (create_savings_plan_execution_checklist,
                                   normalize_savings_plan_rows, validate_savings_plan_budget)
 from screenshot_parser import (create_holding_from_screenshot_data, parse_scalable_text,
@@ -30,6 +38,8 @@ from screenshot_parser import (create_holding_from_screenshot_data, parse_scalab
 from scoring import score_assets
 from sentiment_engine import classify_sentiment, create_market_sentiment_summary
 from storage import ScreenshotStorage
+from symbol_resolver import (SymbolResolver, fresh_bad_symbols,
+                             store_symbol_resolution as cache_symbol_resolution)
 from styles import inject_premium_css
 from strategy_engine import (create_strategy_explanation, get_current_strategy,
                              refresh_market_strategy)
@@ -64,12 +74,12 @@ SCORE_COLUMNS = ["Quality Score", "Momentum Score", "Cost Score", "Portfolio Fit
                  "Risk Control Score", "Total Score", "Data Confidence"]
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def cached_quote(symbol: str, bucket: int):
     return get_market_quote(symbol)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=43200, show_spinner=False)
 def cached_fx(currency: str, bucket: int):
     rate = get_fx_rate_to_eur(currency)
     return rate, "" if rate else "FX rate unavailable"
@@ -126,15 +136,52 @@ def initialise_state(database: Database):
                     "live_enabled": True, "scraping_enabled": True, "news_enabled": True,
                     "rate_limit_seconds": 0.25, "refresh_interval": 300, "risk_profile": "Aggressive"}
     app_settings.update({key: value for key, value in saved_settings.items() if key in app_settings})
+    try: provider_failures = database.load_provider_failures()
+    except (AttributeError, SupabaseConnectionError): provider_failures = []
+    try: deep_job = database.load_active_enrichment_job()
+    except (AttributeError, SupabaseConnectionError): deep_job = None
+    try: source_audit = database.load_data_audit()
+    except (AttributeError, SupabaseConnectionError): source_audit = pd.DataFrame()
+    try: symbol_cache = database.load_symbol_resolutions()
+    except (AttributeError, SupabaseConnectionError): symbol_cache = []
+    for cached_resolution in symbol_cache:
+        cache_symbol_resolution(cached_resolution.get("asset_key", ""), cached_resolution)
+    cached_quotes, cached_fx_rates, cached_fetches = {}, {"EUR": 1.0}, []
+    try:
+        for row in database.load_market_data_cache():
+            payload = row.get("payload") or {}; key = str(row.get("cache_key", ""))
+            fetched_at = payload.get("fetched_at") or row.get("fetched_at", "")
+            if row.get("data_kind") == "price" and key.startswith("price:"):
+                symbol = key.removeprefix("price:")
+                if symbol not in cached_quotes:
+                    cached_quotes[symbol] = MarketQuote(
+                        symbol=symbol, latest_price=payload.get("latest_price"),
+                        previous_close=payload.get("previous_close"), currency=payload.get("currency", ""),
+                        fetched_at=fetched_at, histories={})
+                    if fetched_at: cached_fetches.append(str(fetched_at))
+            elif row.get("data_kind") == "fx" and key.startswith("fx:"):
+                currency = key.removeprefix("fx:")
+                if currency not in cached_fx_rates and payload.get("rate"):
+                    cached_fx_rates[currency] = float(payload["rate"])
+    except (AttributeError, SupabaseConnectionError, TypeError, ValueError):
+        pass
+    try:
+        cached_news = database.load_news()
+        cached_news_items = cached_news.to_dict("records") if not cached_news.empty else []
+    except (AttributeError, SupabaseConnectionError): cached_news_items = []
+    cached_sentiment = (create_market_sentiment_summary(cached_news_items, pd.DataFrame()) if cached_news_items else
+                        {"sentiment": "Neutral", "market_regime": "Neutral", "confidence": "Low",
+                         "explanation": "News has not been refreshed yet."})
     defaults = {
         "holdings": db_holdings if not db_holdings.empty else holdings_to_dataframe(SAMPLE_HOLDINGS),
         "candidates": _normalise_candidates(db_candidates if not db_candidates.empty else pd.DataFrame(SAMPLE_CANDIDATES)),
         "targets": saved_settings.get("target_allocations", TARGET_ALLOCATIONS.copy()),
-        "quotes": {}, "fx_rates": {"EUR": 1.0},
-        "last_price_fetch": None, "enrichment_audit": pd.DataFrame(), "enrichment_warnings": [],
-        "provider_status": [],
-        "news_items": [], "sentiment": {"sentiment": "Neutral", "market_regime": "Neutral",
-                                           "confidence": "Low", "explanation": "News has not been refreshed yet."},
+        "quotes": cached_quotes, "fx_rates": cached_fx_rates,
+        "last_price_fetch": max(cached_fetches, default=None), "enrichment_audit": pd.DataFrame(), "enrichment_warnings": [],
+        "provider_status": [], "provider_failures": provider_failures, "deep_scan_job": deep_job,
+        "deep_scan_progress": [], "data_gap_report": pd.DataFrame(), "source_audit": source_audit,
+        "symbol_resolution_cache": symbol_cache,
+        "news_items": cached_news_items, "sentiment": cached_sentiment,
         "settings": app_settings}
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -169,6 +216,8 @@ def _enrich_current(details: pd.DataFrame) -> pd.DataFrame:
 
 def recompute_models():
     details = valuate_holdings(st.session_state.holdings, st.session_state.quotes, st.session_state.fx_rates)
+    details = pd.DataFrame([{**row.to_dict(), **assess_asset_readiness(row, False)}
+                            for _, row in details.iterrows()])
     st.session_state.valuation_details = details
     st.session_state.holdings = holdings_to_dataframe(details.to_dict("records"))
     drift = calculate_drift(st.session_state.holdings, st.session_state.targets)
@@ -212,20 +261,37 @@ def refresh_live_data(force=False):
     interval = max(30, int(st.session_state.settings["refresh_interval"]))
     bucket = int(time.time() // interval)
     symbols = set(st.session_state.holdings["price_symbol"].astype(str)) | set(st.session_state.candidates["price_symbol"].astype(str))
-    symbols = sorted(symbol for symbol in symbols if symbol and symbol.lower() != "nan")
-    quotes = {symbol: cached_quote(symbol, bucket) for symbol in symbols}
+    cooling_down = fresh_bad_symbols(st.session_state.get("symbol_resolution_cache", []))
+    symbols = sorted(symbol for symbol in symbols
+                     if symbol and symbol.lower() != "nan" and symbol not in cooling_down)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        quotes = dict(zip(symbols, executor.map(lambda symbol: cached_quote(symbol, bucket), symbols)))
     currencies = {quote.currency for quote in quotes.values() if quote.currency}
     fx_rates = {"EUR": 1.0}
-    for currency in currencies - {"EUR"}:
-        rate, _ = cached_fx(currency, bucket)
-        if rate:
-            fx_rates[currency] = rate
+    pending_currencies = sorted(currencies - {"EUR"})
+    with ThreadPoolExecutor(max_workers=min(4, max(1, len(pending_currencies)))) as executor:
+        rates = list(executor.map(lambda currency: cached_fx(currency, bucket), pending_currencies))
+    for currency, (rate, _) in zip(pending_currencies, rates):
+        if rate: fx_rates[currency] = rate
     st.session_state.quotes, st.session_state.fx_rates = quotes, fx_rates
     successful = [quote.fetched_at for quote in quotes.values() if quote.is_available]
     if successful:
         st.session_state.last_price_fetch = max(successful)
     recompute_models()
+    try:
+        cache = SupabaseDataCache(database.gateway, user_id)
+        for symbol, quote in quotes.items():
+            if quote.is_available:
+                cache.set(f"price:{symbol}", {"latest_price": quote.latest_price,
+                          "previous_close": quote.previous_close, "currency": quote.currency,
+                          "fetched_at": quote.fetched_at}, "yfinance", "price")
+        for currency, rate in fx_rates.items(): cache.set(f"fx:{currency}", {"rate": rate}, "ECB/yfinance", "fx")
+        database.save_holdings(st.session_state.holdings)
+    except (AttributeError, SupabaseConnectionError):
+        pass  # Cache schema may not be installed yet; valuation remains usable in session.
     failed = [symbol for symbol, quote in quotes.items() if not quote.is_available]
+    if cooling_down:
+        st.caption(f"Skipped {len(cooling_down)} symbol candidate(s) still inside the seven-day failure cooldown.")
     if failed:
         render_alert("Live price unavailable; run Data Enrichment, then use manual fallback after enrichment failed: " + ", ".join(failed), "warning")
 
@@ -578,6 +644,124 @@ def _run_data_enrichment(force_web: bool = False, selected_isin: str | None = No
     recompute_models()
 
 
+def _merge_scanned_asset(result: dict) -> None:
+    """Persist one completed deep-scan asset immediately for rerun/cancellation safety."""
+    asset = result["asset"]; key = str(result["asset_key"])
+    if result.get("symbol_resolution"):
+        try: database.save_symbol_resolution({**result["symbol_resolution"], "asset_key": key,
+                                               "isin": asset.get("isin", ""), "instrument": asset.get("instrument", "")})
+        except (AttributeError, SupabaseConnectionError): pass
+    if result.get("news_items"):
+        merged_news = deduplicate_news(list(st.session_state.get("news_items", [])) + result["news_items"])
+        st.session_state.news_items = merged_news
+        try: database.save_news(merged_news)
+        except (AttributeError, SupabaseConnectionError): pass
+    if result["is_candidate"]:
+        rows = [asset if str(row.get("isin") or row.get("instrument")) == key else row
+                for row in st.session_state.candidates.to_dict("records")]
+        st.session_state.candidates = _normalise_candidates(pd.DataFrame(rows))
+        database.save_candidates(st.session_state.candidates)
+    else:
+        rows = [asset if str(row.get("isin") or row.get("instrument")) == key else row
+                for row in st.session_state.holdings.to_dict("records")]
+        st.session_state.holdings = holdings_to_dataframe(rows)
+        database.save_holdings(st.session_state.holdings)
+    audit_rows = []
+    for field in ("price_symbol", "live_current_price", "currency", "fx_rate_to_eur", "ter_pct",
+                  "fund_size_eur", "factsheet_url", "issuer", "asset_type", "category"):
+        value = asset.get(field)
+        if value not in (None, ""):
+            audit_rows.append({"asset_key": key, "isin": asset.get("isin", ""), "field_name": field,
+                "field_value": value, "provider": asset.get("data_source", "Market Data Engine"),
+                "source_url": asset.get("source_url", ""), "source_title": asset.get("issuer", ""),
+                "fetched_at": asset.get("last_updated") or datetime.now(timezone.utc).isoformat(),
+                "confidence": asset.get("data_confidence", "Low"), "extraction_method": "staged source waterfall",
+                "user_confirmed": bool(asset.get("confirmed_by_user", False)),
+                "conflict": (asset.get("metadata_conflicts") or {}).get(field)})
+    for field, suggestion in (asset.get("enrichment_suggestions") or {}).items():
+        if not isinstance(suggestion, dict) or suggestion.get("value") in (None, ""):
+            continue
+        audit_rows.append({"asset_key": key, "isin": asset.get("isin", ""), "field_name": field,
+            "field_value": suggestion.get("value"), "provider": suggestion.get("provider", "Unknown"),
+            "source_url": suggestion.get("source_url", asset.get("source_url", "")),
+            "source_title": suggestion.get("source_title", "Suggested value"),
+            "fetched_at": suggestion.get("fetched_at") or datetime.now(timezone.utc).isoformat(),
+            "confidence": suggestion.get("confidence", "Low"), "extraction_method": "provider suggestion",
+            "user_confirmed": False, "conflict": (asset.get("metadata_conflicts") or {}).get(field)})
+    try:
+        database.save_data_audit(audit_rows)
+        st.session_state.source_audit = pd.concat([pd.DataFrame(audit_rows), st.session_state.source_audit],
+                                                   ignore_index=True).head(2000)
+    except (AttributeError, SupabaseConnectionError): pass
+
+
+def _repair_symbols_on_demand(progress_callback=None) -> dict:
+    resolver = SymbolResolver()
+    assets = st.session_state.holdings.to_dict("records") + st.session_state.candidates.to_dict("records")
+    results = repair_symbol_batch(assets, resolver, max_workers=4, progress_callback=progress_callback)
+    for item in results:
+        try: database.save_symbol_resolution({**item["resolution"], "asset_key": str(item["asset"].get("isin") or item["asset"].get("instrument")),
+                                               "isin": item["asset"].get("isin", ""), "instrument": item["asset"].get("instrument", "")})
+        except (AttributeError, SupabaseConnectionError): pass
+    chosen = {str(item["asset"].get("isin") or item["asset"].get("instrument")): item["resolution"].get("chosen_symbol")
+              for item in results if item["resolution"].get("chosen_symbol")}
+    if chosen:
+        holdings = st.session_state.holdings.copy(); candidates = st.session_state.candidates.copy()
+        for index, row in holdings.iterrows():
+            key = str(row.get("isin") or row.get("instrument")); holdings.loc[index, "price_symbol"] = chosen.get(key, row.get("price_symbol", ""))
+        for index, row in candidates.iterrows():
+            key = str(row.get("isin") or row.get("instrument")); candidates.loc[index, "price_symbol"] = chosen.get(key, row.get("price_symbol", ""))
+        st.session_state.holdings = holdings_to_dataframe(holdings.to_dict("records"))
+        st.session_state.candidates = _normalise_candidates(candidates)
+        database.save_holdings(st.session_state.holdings); database.save_candidates(st.session_state.candidates)
+        recompute_models()
+    return {"tested": len(results), "resolved": len(chosen), "results": results}
+
+
+def _run_deep_scan_chunk(max_assets: int = 5, progress_callback=None) -> dict:
+    total = len(st.session_state.holdings) + len(st.session_state.candidates)
+    job = st.session_state.get("deep_scan_job") or {"job_type": "deep_scan", "status": "Pending",
+        "total_assets": total, "processed_assets": 0, "current_asset": "", "warnings": [],
+        "completed_keys": [], "started_at": datetime.now(timezone.utc).isoformat()}
+    job["status"] = "Running"; job["updated_at"] = datetime.now(timezone.utc).isoformat()
+    try: job = database.save_enrichment_job(job)
+    except (AttributeError, SupabaseConnectionError): pass
+    retry_queue = RetryQueue()
+    retry_queue.memory = list(st.session_state.get("provider_failures", []))
+    initial_failure_count = len(retry_queue.memory)
+    engine = MarketDataEngine(
+        st.session_state.settings.get("scraping_enabled", True),
+        st.session_state.settings.get("rate_limit_seconds", .25), retry_queue=retry_queue)
+    scanner = DeepScanEngine(engine, SymbolResolver(), max_workers=4, max_asset_seconds=45,
+                             news_fetcher=get_asset_news)
+    def save_partial(result):
+        _merge_scanned_asset(result)
+        job["processed_assets"] = int(job.get("processed_assets", 0)) + 1
+        job["current_asset"] = result["asset"].get("instrument", result["asset_key"])
+        job["completed_keys"] = sorted(set(job.get("completed_keys", [])) | {result["asset_key"]})
+        job["updated_at"] = datetime.now(timezone.utc).isoformat()
+        try: database.save_enrichment_job(job)
+        except (AttributeError, SupabaseConnectionError): pass
+    result = scanner.run_chunk(st.session_state.holdings, st.session_state.candidates, max_assets,
+                               set(job.get("completed_keys", [])), progress_callback, save_partial)
+    for failure in retry_queue.memory[initial_failure_count:]:
+        try: database.save_provider_failure(failure)
+        except (AttributeError, SupabaseConnectionError): pass
+    recompute_models()
+    gaps = generate_data_gap_report(st.session_state.scored_current, st.session_state.scored_candidates,
+                                    st.session_state.get("provider_failures", []))
+    st.session_state.data_gap_report = gaps; job["warnings"] = list(job.get("warnings", [])) + result["warnings"]
+    job["status"] = "Completed" if result["remaining"] == 0 else "Paused"
+    job["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if job["status"] == "Completed": job["completed_at"] = job["updated_at"]
+    try: job = database.save_enrichment_job(job)
+    except (AttributeError, SupabaseConnectionError): pass
+    st.session_state.deep_scan_job = job; st.session_state.enrichment_audit = pd.DataFrame(engine.audit)
+    try: st.session_state.provider_failures = database.load_provider_failures()
+    except (AttributeError, SupabaseConnectionError): st.session_state.provider_failures = retry_queue.memory
+    return {**result, "job": job, "gap_report": gaps}
+
+
 def _refresh_news_and_strategy(redesign: bool = False):
     items = get_market_news() if st.session_state.settings.get("news_enabled", True) else []
     items = rank_news_by_relevance(items, st.session_state.holdings, st.session_state.candidates,
@@ -879,10 +1063,17 @@ def market_data_news_section():
     render_flash_message()
     sentiment = st.session_state.sentiment
     missing = _missing_data_frame()
-    engine = MarketDataEngine(st.session_state.settings.get("scraping_enabled", True),
-                              st.session_state.settings.get("rate_limit_seconds", .25))
-    providers = st.session_state.provider_status or engine.provider_status_rows(
-        st.session_state.settings.get("news_enabled", True))
+    providers = get_provider_registry()
+    runtime_provider_status = {str(row.get("Provider")): row for row in st.session_state.get("provider_status", [])}
+    for row in providers:
+        runtime = runtime_provider_status.get(str(row.get("Provider")), {})
+        row["Last success"] = runtime.get("Last success", row.get("Last success", ""))
+        row["Last error"] = runtime.get("Last error", row.get("Last error", ""))
+    coverage = calculate_data_coverage(st.session_state.scored_current, st.session_state.scored_candidates,
+                                       st.session_state.news_items)
+    gap_report = generate_data_gap_report(st.session_state.scored_current, st.session_state.scored_candidates,
+                                          st.session_state.get("provider_failures", []))
+    st.session_state.data_gap_report = gap_report
     active_sources = sum(str(row.get("Status")) == "Enabled" for row in providers)
     render_page_header("Market", "Market-data health, missing-data repair, public news, sentiment, and candidate research.",
                        "Live" if st.session_state.settings.get("live_enabled", True) else "Disabled")
@@ -893,25 +1084,29 @@ def market_data_news_section():
     with kpis[0]: render_metric_card("Regime", sentiment.get("market_regime", "Neutral"), tone="info")
     with kpis[1]: render_metric_card("Sentiment", sentiment.get("sentiment", "Neutral"), sentiment.get("confidence", "Low") + " confidence")
     with kpis[2]: render_metric_card("Active sources", active_sources, f"of {len(providers)} configured", "positive")
-    with kpis[3]: render_metric_card("Missing items", len(missing), "Repair required" if len(missing) else "Complete", "warning" if len(missing) else "positive")
+    with kpis[3]: render_metric_card("Missing items", len(gap_report), "Repair required" if len(gap_report) else "Complete", "warning" if len(gap_report) else "positive")
     with kpis[4]: render_metric_card("Last refresh", st.session_state.last_price_fetch or "Not yet")
 
-    render_section_card("Main actions", "Refresh the evidence layer before reviewing repair suggestions or research rankings.")
+    render_section_card("Staged refresh", "Cached Supabase values load immediately. Network work runs only when you choose a stage.")
+    progress_display = st.empty()
+    def progress_event(event):
+        elapsed = f" · {event.get('elapsed', 0):.1f}s" if event.get("elapsed") is not None else ""
+        progress_display.info(f"{event.get('asset', '')} · {event.get('provider', '')} · {event.get('status', '')}{elapsed}")
     action_a, action_b, action_c, action_d = st.columns(4)
-    if action_a.button("Refresh live prices", type="primary", use_container_width=True):
+    if action_a.button("Quick refresh prices", type="primary", use_container_width=True):
         with st.spinner("Refreshing prices and FX..."): refresh_live_data(True)
         set_flash_success("Live prices refreshed"); st.rerun()
-    if action_b.button("Enrich missing ISIN data", use_container_width=True):
-        with st.spinner("Running free identifier and metadata enrichment..."): _run_data_enrichment(True)
-        set_flash_success("Internet enrichment completed"); st.rerun()
-    if action_c.button("Fetch market news", use_container_width=True):
+    if action_b.button("Repair missing symbols", use_container_width=True):
+        with st.spinner("Testing bounded symbol candidates..."): result = _repair_symbols_on_demand(progress_event)
+        set_flash_success(f"Symbol repair finished: {result['resolved']} resolved"); st.rerun()
+    if action_c.button("Deep metadata scan", use_container_width=True):
+        with st.spinner("Processing a five-asset deep-scan chunk..."): result = _run_deep_scan_chunk(5, progress_event)
+        set_flash_success(f"Deep scan saved {result['processed']} assets; {result['remaining']} remain"); st.rerun()
+    if action_d.button("Refresh news & sentiment", use_container_width=True):
         with st.spinner("Fetching public market news..."): _refresh_news_and_strategy(False)
         set_flash_success("Market news refreshed"); st.rerun()
-    if action_d.button("Repair missing data", use_container_width=True, disabled=missing.empty):
-        with st.spinner("Trying all enabled repair sources..."): _run_data_enrichment(True)
-        set_flash_success("Missing-data repair completed"); st.rerun()
 
-    render_section_card("1. Market Data Status", "Provider availability, key requirements, and the latest recorded provider outcome.")
+    render_section_card("1. Market Data Engine", "Provider availability, capabilities, timeout budgets, and optional-key status.")
     provider_cols = st.columns(4)
     for index, row in enumerate(providers):
         with provider_cols[index % 4]:
@@ -921,7 +1116,23 @@ def market_data_news_section():
     with st.expander("Provider details and errors", expanded=False):
         st.dataframe(pd.DataFrame(providers), width="stretch", hide_index=True)
 
-    render_section_card("2. Missing Data Repair", "Suggestions remain separate from entered facts until you explicitly accept or confirm them.")
+    render_section_card("2. Data Coverage", "Coverage is calculated from cached holdings and candidates; it does not trigger network requests.")
+    coverage_items = [("Price", "price_coverage"), ("Metadata", "metadata_coverage"), ("TER/cost", "ter_coverage"),
+                      ("FX", "fx_coverage"), ("Factsheet", "factsheet_coverage"), ("News", "news_coverage"),
+                      ("Recommendation-ready", "recommendation_ready"), ("Valuation-ready", "valuation_ready")]
+    for start in (0, 4):
+        coverage_cols = st.columns(4)
+        for column, (label, key) in zip(coverage_cols, coverage_items[start:start + 4]):
+            value = float(coverage.get(key, 0)); tone = "positive" if value >= 90 else "warning" if value >= 75 else "negative"
+            with column: render_metric_card(label, f"{value:.1f}%", tone=tone)
+    if coverage["price_coverage"] < 90: render_alert("Price coverage is below 90%; valuation confidence is reduced.", "warning")
+    if coverage["metadata_coverage"] < 75: render_alert("Metadata coverage is below 75%; strategy and scoring confidence are reduced.", "warning")
+    if coverage["ter_coverage"] < 75: render_alert("ETF TER/cost coverage is below 75%; incomplete ETF candidates remain blocked from buy/add.", "danger")
+    with st.expander("Open precise Data Gap Report", expanded=False):
+        if gap_report.empty: render_empty_state("No detected gaps", "Cached data currently satisfies the configured coverage checks.")
+        else: st.dataframe(gap_report, width="stretch", hide_index=True)
+
+    render_section_card("3. Missing Data Repair", "Suggestions remain separate from entered facts until you explicitly accept or confirm them.")
     repair_labels = ["Price symbol", "TER/cost", "Category", "Factsheet URL", "Conflicting metadata"]
     repair_cols = st.columns(5)
     missing_text = missing.get("Missing / repair needed", pd.Series(dtype=str)).fillna("")
@@ -969,12 +1180,16 @@ def market_data_news_section():
             if st.button("Accept suggested value", key="market_accept_suggestion"):
                 _replace_asset(dataset, selected, accept_suggestion(asset, suggestion_field)); st.rerun()
         with st.expander("Enter a value manually and mark it confirmed", expanded=False):
+            enrichment_attempted = bool(asset.get("manual_review_attempted", False))
+            if not enrichment_attempted:
+                render_alert("Run Auto repair first. Manual fallback unlocks after the source waterfall has been attempted.", "warning")
             manual_fields = ["price_symbol", "ter_pct", "asset_type", "category", "factsheet_url",
                              "scalable_compatible", "issuer", "currency"]
             field = st.selectbox("Field", manual_fields, key="market_manual_field")
             manual_value = st.text_input("Confirmed value", key="market_manual_value")
             confirmed = st.checkbox("I verified this value", key="market_manual_confirmed")
-            if st.button("Save confirmed value", key="market_save_manual", disabled=not (manual_value and confirmed)):
+            if st.button("Save confirmed value", key="market_save_manual",
+                         disabled=not (manual_value and confirmed and enrichment_attempted)):
                 updated = dict(asset)
                 if field == "ter_pct":
                     try: updated[field] = float(manual_value.replace(",", "."))
@@ -985,7 +1200,31 @@ def market_data_news_section():
                 updated["confirmed_by_user"] = True
                 _replace_asset(dataset, selected, updated); st.rerun()
 
-    render_section_card("3. Internet Enrichment", "Every identifier, price, FX, metadata, and safe web attempt is retained for review.")
+    render_section_card("4. Deep Data Scan", "Deep mode skips fresh complete assets and processes a small parallel chunk. Each completed asset is saved immediately.")
+    job = st.session_state.get("deep_scan_job") or {}
+    job_cols = st.columns(4)
+    with job_cols[0]: render_metric_card("Status", job.get("status", "Not started"))
+    with job_cols[1]: render_metric_card("Processed", int(job.get("processed_assets", 0) or 0))
+    with job_cols[2]: render_metric_card("Total assets", int(job.get("total_assets", coverage["total_assets"]) or 0))
+    with job_cols[3]: render_metric_card("Current asset", job.get("current_asset", "—") or "—")
+    total_assets = max(1, int(job.get("total_assets", coverage["total_assets"]) or 1))
+    st.progress(min(1.0, float(job.get("processed_assets", 0) or 0) / total_assets),
+                text="Partial progress is stored in Supabase after every completed asset.")
+    chunk_size = st.number_input("Assets per scan chunk", min_value=1, max_value=10, value=5, step=1)
+    deep_a, deep_b = st.columns(2)
+    deep_label = "Continue Deep Scan" if job.get("status") == "Paused" else "Run Deep Data Scan"
+    if deep_a.button(deep_label, type="primary", use_container_width=True):
+        with st.spinner("Running the next bounded deep-scan chunk..."): scan_result = _run_deep_scan_chunk(int(chunk_size), progress_event)
+        set_flash_success(f"Deep scan saved {scan_result['processed']} assets; {scan_result['remaining']} remain"); st.rerun()
+    if deep_b.button("Restart deep-scan queue", use_container_width=True, disabled=not bool(job)):
+        cancelled = {**job, "status": "Cancelled", "completed_at": datetime.now(timezone.utc).isoformat(),
+                     "updated_at": datetime.now(timezone.utc).isoformat()}
+        try: database.save_enrichment_job(cancelled)
+        except (AttributeError, SupabaseConnectionError): pass
+        st.session_state.deep_scan_job = None; set_flash_success("Deep-scan queue reset"); st.rerun()
+    render_alert("Streamlit Cloud does not guarantee background workers. Keep this page open during a chunk; cached portfolio views remain fast between chunks.", "info")
+
+    render_section_card("Internet Enrichment", "Provider and safe-web attempts are cached and retained for review.")
     audit = st.session_state.enrichment_audit
     audit_cols = st.columns(3)
     with audit_cols[0]: render_metric_card("Audit events", len(audit))
@@ -997,7 +1236,7 @@ def market_data_news_section():
         else: st.dataframe(audit, width="stretch", hide_index=True)
         st.download_button("Export enrichment audit CSV", audit.to_csv(index=False), "enrichment_audit.csv", "text/csv")
 
-    render_section_card("4. Latest Market News", "Public headlines ranked against your holdings, candidate assets, themes, and strategy.")
+    render_section_card("5. News & Sentiment", "GDELT, public RSS, and available yfinance headlines ranked against your portfolio and themes.")
     news = pd.DataFrame(st.session_state.news_items)
     if news.empty:
         render_empty_state("No market news cached", "Use Fetch market news to build the current feed.")
@@ -1012,7 +1251,7 @@ def market_data_news_section():
             st.dataframe(filtered[columns], width="stretch", hide_index=True,
                          column_config={"url": st.column_config.LinkColumn("Link")})
 
-    render_section_card("5. Market Sentiment", "An explainable blend of public-news language and observed market momentum.")
+    render_section_card("Sentiment summary", "A transparent, recency-weighted blend of public-news language and observed market momentum.")
     sentiment_cols = st.columns(3)
     with sentiment_cols[0]: render_metric_card("Sentiment", sentiment.get("sentiment", "Neutral"), tone="info")
     with sentiment_cols[1]: render_metric_card("Regime", sentiment.get("market_regime", "Neutral"), tone="info")
@@ -1021,7 +1260,21 @@ def market_data_news_section():
     if st.button("Use current sentiment in strategy refresh"):
         _refresh_news_and_strategy(True); set_flash_success("Strategy refreshed"); st.rerun()
 
-    render_section_card("6. Candidate Asset Research", "Edit the candidate universe first; open rankings and detailed quality only when needed.")
+    render_section_card("6. Source Audit", "Field-level source records, conflicts, failures, cooldowns, and the latest in-session enrichment trace.")
+    failure_frame = pd.DataFrame(st.session_state.get("provider_failures", []))
+    audit_tabs = st.columns(3)
+    with audit_tabs[0]: render_metric_card("Audit events", len(audit))
+    with audit_tabs[1]: render_metric_card("Provider failures", len(failure_frame), tone="warning" if len(failure_frame) else "positive")
+    with audit_tabs[2]: render_metric_card("Retry queue", len(RetryQueue().due(failure_frame.to_dict("records") if not failure_frame.empty else [])))
+    with st.expander("Provider failures and retry cooldowns", expanded=False):
+        if failure_frame.empty: render_empty_state("No stored provider failures", "Failures will appear here without stopping the remaining waterfall.")
+        else: st.dataframe(failure_frame, width="stretch", hide_index=True)
+    with st.expander("Field-level source audit", expanded=False):
+        source_audit = st.session_state.get("source_audit", pd.DataFrame())
+        if source_audit.empty: render_empty_state("No field audit yet", "Deep scans record provider, URL, confidence, extraction method, and conflicts here.")
+        else: st.dataframe(source_audit, width="stretch", hide_index=True)
+
+    render_section_card("Candidate Asset Research", "Edit the candidate universe first; open rankings and detailed quality only when needed.")
     with st.expander("Candidate universe editor", expanded=False): candidate_universe()
     with st.expander("Market research rankings", expanded=False): market_research_dashboard()
     with st.expander("Detailed asset quality", expanded=False): asset_quality_dashboard()
@@ -1100,6 +1353,18 @@ def rebalance_section():
     render_hero_summary("Full portfolio review", "Run full rebalance", "One guided workflow",
                         "Refreshes market evidence and produces a manual Scalable execution checklist. It never places an order.")
     render_alert("No broker connection, orders, or automatic savings-plan updates. Check the live Scalable price before every execution.", "warning")
+    coverage = calculate_data_coverage(st.session_state.scored_current, st.session_state.scored_candidates,
+                                       st.session_state.news_items)
+    gaps = generate_data_gap_report(st.session_state.scored_current, st.session_state.scored_candidates,
+                                    st.session_state.get("provider_failures", []))
+    if not gaps.empty:
+        render_alert(f"Recommendation quality reduced because {len(gaps)} fields or provider checks are unresolved.", "warning")
+    if coverage["price_coverage"] < 90:
+        render_alert(f"Price coverage is {coverage['price_coverage']:.1f}% (below the 90% caution threshold).", "warning")
+    if coverage["metadata_coverage"] < 75:
+        render_alert(f"Metadata coverage is {coverage['metadata_coverage']:.1f}% (below the 75% caution threshold).", "warning")
+    if coverage["ter_coverage"] < 75:
+        render_alert("ETF cost coverage is below 75%; incomplete ETF candidates are blocked from buy/add.", "danger")
     st.session_state.market_reasoning_notes = st.text_area(
         "Short market reasoning notes",
         value=st.session_state.get("market_reasoning_notes", ""),
@@ -1133,8 +1398,8 @@ def rebalance_section():
             return wrapped
         steps = {
             "refresh_prices": progress_step("refresh_prices", .06, lambda _: refresh_live_data(True)),
-            "enrich_assets": progress_step("enrich_assets", .13, lambda _: _run_data_enrichment(False)),
-            "repair_missing_metadata": progress_step("repair_missing_metadata", .20, lambda _: _run_data_enrichment(True)),
+            "enrich_assets": progress_step("enrich_assets", .13, lambda _: _repair_symbols_on_demand()),
+            "repair_missing_metadata": progress_step("repair_missing_metadata", .20, lambda _: _run_deep_scan_chunk(5)),
             "fetch_news": progress_step("fetch_news", .28, lambda _: _refresh_news_and_strategy(False)),
             "calculate_sentiment": progress_step("calculate_sentiment", .35, lambda _: st.session_state.sentiment),
             "redesign_strategy": progress_step("redesign_strategy", .42, lambda _: _refresh_news_and_strategy(True)),
@@ -1213,8 +1478,7 @@ def settings_page():
             [{"Secret": name, "Required": "No", "Status": secret_status(name)} for name in optional]),
             width="stretch", hide_index=True)
     render_section_card("Data providers", "Free sources lead the waterfall; paid-key adapters remain optional.")
-    settings_engine = MarketDataEngine(s.get("scraping_enabled", True), s.get("rate_limit_seconds", .25))
-    provider_rows = st.session_state.provider_status or settings_engine.provider_status_rows(s.get("news_enabled", True))
+    provider_rows = get_provider_registry()
     st.dataframe(pd.DataFrame(provider_rows), width="stretch", hide_index=True)
     render_section_card("Strategy settings", "Long-term allocation and risk guardrails used by the optimizer.")
     a, b, c = st.columns(3)
@@ -1235,7 +1499,9 @@ def settings_page():
     s["direct_trade_minimum"] = c.number_input("Direct trade minimum EUR", min_value=0.0, value=float(s["direct_trade_minimum"]))
     s["small_trade_round_trip_fee"] = a.number_input("Below-threshold round-trip fee EUR", min_value=0.0, value=float(s["small_trade_round_trip_fee"]))
     intervals = [60, 300, 600, 900]
-    s["refresh_interval"] = b.selectbox("Data refresh interval", intervals, index=intervals.index(s["refresh_interval"]),
+    current_interval = int(s.get("refresh_interval", 300))
+    interval_index = intervals.index(current_interval) if current_interval in intervals else 1
+    s["refresh_interval"] = b.selectbox("Data refresh interval", intervals, index=interval_index,
                                         format_func=lambda value: f"{value // 60} minute(s)")
     st.session_state.settings = s
     render_section_card("Target allocation")

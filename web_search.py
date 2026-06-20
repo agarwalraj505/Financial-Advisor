@@ -6,6 +6,8 @@ from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from urllib.request import Request, urlopen
 
+import streamlit as st
+
 from source_ranker import classify_source_url, rank_source_urls
 
 
@@ -38,12 +40,13 @@ class _ResultParser(HTMLParser):
                 self.urls.append(href)
 
 
+@st.cache_data(ttl=604800, show_spinner=False)
 def search_public_web(query: str, max_results: int = 5) -> list[dict]:
     """Use DuckDuckGo's public HTML page politely; return [] if blocked or unavailable."""
     try:
         url = "https://html.duckduckgo.com/html/?q=" + quote_plus(query)
         request = Request(url, headers={"User-Agent": "wealth-manager/1.0"})
-        with urlopen(request, timeout=15) as response:
+        with urlopen(request, timeout=10) as response:
             html = response.read(1_500_000).decode("utf-8", errors="ignore")
         parser = _ResultParser(); parser.feed(html)
         return [{"url": url, **classify_source_url(url), "query": query} for url in parser.urls[:max_results]]

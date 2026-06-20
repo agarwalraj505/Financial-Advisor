@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 import pandas as pd
 
@@ -52,6 +53,10 @@ HOLDING_MAP = {"instrument": "instrument", "isin": "isin", "ticker_id": "ticker_
     "sell_price_eur": "sell_price_eur", "buy_price_eur": "buy_price_eur", "spread_eur": "spread_eur",
     "spread_percent": "spread_percent", "screenshot_path": "screenshot_path",
     "screenshot_captured_at": "screenshot_captured_at", "source": "source", "user_confirmed": "user_confirmed"}
+HOLDING_MAP.update({"ter_pct": "ter_percent", "fund_size_eur": "fund_size_eur",
+    "replication_method": "replication_method", "distribution_policy": "distribution_policy",
+    "domicile": "domicile", "manual_spread_estimate_pct": "manual_spread_estimate_percent",
+    "last_updated": "last_updated"})
 
 CANDIDATE_MAP = {"instrument": "instrument", "isin": "isin", "ticker_id": "ticker_id",
     "price_symbol": "price_symbol", "asset_type": "asset_type", "category": "category", "theme": "theme",
@@ -191,11 +196,11 @@ class Database:
             row["user_id"] = self.user_id
             if not row.get("published_at"): row["published_at"] = None
             rows.append(row)
-        self.gateway.insert("market_news", rows)
+        self.gateway.replace_user_rows("market_news", self.user_id, rows)
 
     def load_news(self) -> pd.DataFrame:
         return pd.DataFrame(self.gateway.select("market_news", {"user_id": self.user_id},
-                                                order="published_at", desc=True))
+                                                order="published_at", desc=True, limit=200))
 
     def save_strategy_snapshot(self, strategy: dict) -> None:
         allowed = {"strategy_name", "market_regime", "risk_profile", "target_allocations",
@@ -219,6 +224,65 @@ class Database:
     def load_rebalance_runs(self) -> pd.DataFrame:
         return pd.DataFrame(self.gateway.select("rebalance_runs", {"user_id": self.user_id},
                                                 order="created_at", desc=True))
+
+    def load_symbol_resolution(self, asset_key: str) -> dict | None:
+        rows = self.gateway.select("symbol_resolution_cache", {"user_id": self.user_id, "asset_key": asset_key})
+        return rows[0] if rows else None
+
+    def load_symbol_resolutions(self) -> list[dict]:
+        return self.gateway.select("symbol_resolution_cache", {"user_id": self.user_id},
+                                   order="last_tested", desc=True, limit=1000)
+
+    def save_symbol_resolution(self, row: dict) -> None:
+        payload = {key: clean_value(value) for key, value in row.items() if key in {
+            "asset_key", "isin", "instrument", "chosen_symbol", "candidate_symbols", "bad_symbols",
+            "confidence", "source", "last_tested", "error"}}
+        payload["user_id"] = self.user_id
+        self.gateway.upsert("symbol_resolution_cache", payload, on_conflict="user_id,asset_key")
+
+    def save_provider_failure(self, row: dict) -> None:
+        payload = {key: clean_value(value) for key, value in row.items() if key in {
+            "provider", "asset_key", "isin", "attempted_value", "error_type", "error_message",
+            "retry_after", "attempts"}}
+        payload["user_id"] = self.user_id
+        self.gateway.insert("provider_failures", payload)
+
+    def load_provider_failures(self) -> list[dict]:
+        return self.gateway.select("provider_failures", {"user_id": self.user_id}, order="created_at", desc=True, limit=200)
+
+    def save_data_audit(self, rows: list[dict]) -> None:
+        payloads = []
+        for row in rows:
+            payload = {key: clean_value(value) for key, value in row.items() if key in {
+                "asset_key", "isin", "field_name", "field_value", "provider", "source_url", "source_title",
+                "fetched_at", "confidence", "extraction_method", "user_confirmed", "conflict"}}
+            if payload.get("field_value") is not None and not isinstance(payload["field_value"], str):
+                payload["field_value"] = str(payload["field_value"])
+            payload["user_id"] = self.user_id; payloads.append(payload)
+        if payloads: self.gateway.insert("data_source_audit", payloads)
+
+    def load_data_audit(self) -> pd.DataFrame:
+        return pd.DataFrame(self.gateway.select("data_source_audit", {"user_id": self.user_id},
+                                                order="fetched_at", desc=True, limit=500))
+
+    def save_enrichment_job(self, job: dict) -> dict:
+        payload = {key: clean_value(value) for key, value in job.items() if key in {
+            "id", "job_type", "status", "total_assets", "processed_assets", "current_asset",
+            "warnings", "started_at", "updated_at", "completed_at", "completed_keys"}}
+        payload.setdefault("id", str(uuid4())); payload["user_id"] = self.user_id
+        self.gateway.upsert("enrichment_jobs", payload, on_conflict="id")
+        return payload
+
+    def load_active_enrichment_job(self, job_type: str = "deep_scan") -> dict | None:
+        rows = self.gateway.select("enrichment_jobs", {"user_id": self.user_id, "job_type": job_type},
+                                   order="updated_at", desc=True, limit=20)
+        return next((row for row in rows if row.get("status") in {"Pending", "Running", "Paused"}), None)
+
+    def load_market_data_cache(self, data_kind: str | None = None) -> list[dict]:
+        filters = {"user_id": self.user_id}
+        if data_kind:
+            filters["data_kind"] = data_kind
+        return self.gateway.select("market_data_cache", filters, order="fetched_at", desc=True, limit=2000)
 
 
 # Beginner-friendly module-level helpers requested by the Streamlit app contract.

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from math import isnan
+
 from enrichment_audit import audit_event
 from web_search import generate_yfinance_symbol_candidates
 
@@ -12,12 +15,17 @@ def merge_provider_data(asset: dict, provider_data: dict, provider: str,
     conflicts = dict(output.get("metadata_conflicts") or {})
     field_map = {"ter_percent": "ter_pct", "ticker": "ticker_id", "name": "instrument",
                  "security_type": "asset_type"}
+    def missing(value):
+        return value in (None, "", 0) or (isinstance(value, float) and isnan(value))
     for source_field, value in provider_data.items():
         target = field_map.get(source_field, source_field)
-        if target in {"provider", "isin"} or value in (None, ""): continue
+        if target in {"provider", "isin"} or missing(value): continue
         current = output.get(target)
-        if current in (None, "", 0):
-            suggestions[target] = {"value": value, "provider": provider, "confidence": confidence}
+        if missing(current):
+            suggestions[target] = {"value": value, "provider": provider, "confidence": confidence,
+                                   "source_url": provider_data.get("source_url", ""),
+                                   "source_title": provider_data.get("source_title", provider),
+                                   "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
         elif str(current) != str(value):
             conflicts[target] = {"entered": current, "suggested": value,
                                  "provider": provider, "confidence": confidence}

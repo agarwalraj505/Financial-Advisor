@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+
 POSITIVE = {"gain", "growth", "strong", "record", "rally", "upgrade", "beat", "optimism", "cut rates", "cooling inflation"}
 NEGATIVE = {"loss", "weak", "fall", "decline", "downgrade", "miss", "risk", "recession", "war", "inflation surge"}
 
@@ -20,12 +23,24 @@ def score_news_sentiment(news_items: list[dict]) -> dict:
     if not news_items:
         return {"sentiment": "Neutral", "score": 0.0, "confidence": "Low",
                 "explanation": "No usable news was available; strategy should not change from news alone."}
+    weighted, weights = [], []
+    for item in news_items:
+        result = classify_sentiment(item.get("title", "") + " " + item.get("summary", ""))
+        published = item.get("published_at"); age_days = 7.0
+        try:
+            parsed = parsedate_to_datetime(str(published)) if "," in str(published) else datetime.fromisoformat(str(published).replace("Z", "+00:00"))
+            if not parsed.tzinfo: parsed = parsed.replace(tzinfo=timezone.utc)
+            age_days = max(0, (datetime.now(timezone.utc) - parsed).total_seconds() / 86400)
+        except (TypeError, ValueError, OverflowError): pass
+        recency = max(.25, 1 / (1 + age_days / 7))
+        relevance = 1.15 if item.get("related_symbols") or item.get("related_themes") else 1.0
+        weight = recency * relevance; weighted.append(result["score"] * weight); weights.append(weight)
+    score = sum(weighted) / sum(weights) if weights else 0.0
     results = [classify_sentiment(item.get("title", "") + " " + item.get("summary", "")) for item in news_items]
-    score = sum(item["score"] for item in results) / len(results)
     label = "Bullish" if score > .35 else "Mildly bullish" if score > .08 else "Bearish" if score < -.35 else "Cautious" if score < -.08 else "Neutral"
     confidence = "High" if len(results) >= 15 else "Medium" if len(results) >= 5 else "Low"
     return {"sentiment": label, "score": round(score, 3), "confidence": confidence,
-            "explanation": f"Aggregate of {len(results)} deduplicated public-news items."}
+            "explanation": f"Recency- and relevance-weighted aggregate of {len(results)} deduplicated public-news items."}
 
 
 def score_theme_sentiment(news_items: list[dict], theme: str) -> dict:

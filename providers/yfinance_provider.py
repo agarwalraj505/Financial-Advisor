@@ -12,6 +12,9 @@ class YFinanceProvider(BaseProvider):
     name = "yfinance"
     purpose = "Prices/history"
 
+    def __init__(self, timeout_seconds: int = 8):
+        super().__init__(); self.timeout_seconds = timeout_seconds
+
     def get_price(self, symbol: str) -> ProviderResult:
         if not symbol:
             return self.failure("Missing price symbol")
@@ -21,7 +24,7 @@ class YFinanceProvider(BaseProvider):
             price = fast.get("last_price") if hasattr(fast, "get") else getattr(fast, "last_price", None)
             currency = fast.get("currency") if hasattr(fast, "get") else getattr(fast, "currency", None)
             if not price:
-                history = ticker.history(period="5d", interval="1d", auto_adjust=False)
+                history = ticker.history(period="5d", interval="1d", auto_adjust=False, timeout=self.timeout_seconds)
                 close = pd.to_numeric(history.get("Close"), errors="coerce").dropna()
                 price = float(close.iloc[-1]) if not close.empty else None
             if not price:
@@ -32,7 +35,7 @@ class YFinanceProvider(BaseProvider):
 
     def get_history(self, symbol: str, period: str = "1y") -> ProviderResult:
         try:
-            history = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=False)
+            history = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=False, timeout=self.timeout_seconds)
             if history.empty:
                 return self.failure("No yfinance history")
             self.last_success, self.last_error = pd.Timestamp.utcnow().isoformat(), ""
@@ -45,7 +48,7 @@ class YFinanceProvider(BaseProvider):
             return self.failure("Empty search query")
         try:
             quotes = yf.Search(query, max_results=max_results, news_count=0, lists_count=0,
-                               include_research=False, timeout=15, raise_errors=False).quotes
+                               include_research=False, timeout=self.timeout_seconds, raise_errors=False).quotes
             normalized = [{"symbol": item.get("symbol", ""), "name": item.get("longname") or item.get("shortname", ""),
                            "exchange": item.get("exchange", ""), "quote_type": item.get("quoteType", "")}
                           for item in quotes]

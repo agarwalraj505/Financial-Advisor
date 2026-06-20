@@ -23,7 +23,9 @@ HOLDING_COLUMNS = ["instrument", "isin", "ticker_id", "price_symbol", "asset_typ
                    "web_scrape_last_run", "web_scrape_sources", "web_scrape_confidence", "factsheet_url",
                    "kid_url", "issuer", "metadata_conflicts", "enrichment_suggestions", "confirmed_by_user",
                    "suggested_price_symbols", "suggested_asset_type", "suggested_category",
-                   "manual_review_attempted", "last_auto_repair_at"]
+                   "manual_review_attempted", "last_auto_repair_at", "ter_pct", "fund_size_eur",
+                   "replication_method", "distribution_policy", "domicile",
+                   "manual_spread_estimate_pct", "last_updated"]
 
 
 class Holding(BaseModel):
@@ -82,7 +84,9 @@ def _normalise_holdings(data: pd.DataFrame) -> pd.DataFrame:
                 "web_scrape_confidence": "", "factsheet_url": "", "kid_url": "", "issuer": "",
                 "metadata_conflicts": {}, "enrichment_suggestions": {}, "confirmed_by_user": False,
                 "suggested_price_symbols": [], "suggested_asset_type": "", "suggested_category": "",
-                "manual_review_attempted": False, "last_auto_repair_at": ""}
+                "manual_review_attempted": False, "last_auto_repair_at": "", "ter_pct": None,
+                "fund_size_eur": None, "replication_method": "", "distribution_policy": "",
+                "domicile": "", "manual_spread_estimate_pct": None, "last_updated": ""}
     for column, default in defaults.items():
         if column not in frame:
             frame[column] = ([deepcopy(default) for _ in range(len(frame))]
@@ -91,7 +95,8 @@ def _normalise_holdings(data: pd.DataFrame) -> pd.DataFrame:
                       "price_source", "currency", "notes", "wkn", "screenshot_path", "screenshot_captured_at",
                       "source", "valuation_review_reasons", "recommendation_review_reasons", "web_scrape_status",
                       "web_scrape_last_run", "web_scrape_confidence", "factsheet_url", "kid_url", "issuer",
-                      "suggested_asset_type", "suggested_category", "last_auto_repair_at"]
+                      "suggested_asset_type", "suggested_category", "last_auto_repair_at",
+                      "replication_method", "distribution_policy", "domicile", "last_updated"]
     for column in string_columns:
         frame[column] = frame[column].fillna("").astype(str)
     frame["currency"] = frame["currency"].replace("", "EUR")
@@ -105,6 +110,8 @@ def _normalise_holdings(data: pd.DataFrame) -> pd.DataFrame:
                    "current_value_eur", "buy_in_value_eur", "pl_eur", "pl_pct", "current_price_eur",
                    "buy_in_price_eur", "sell_price_eur", "buy_price_eur", "spread_eur", "spread_percent"]:
         frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
+    for column in ["ter_pct", "fund_size_eur", "manual_spread_estimate_pct"]:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
     missing_price = (frame["manual_current_price"] <= 0) & (frame["quantity"] > 0)
     frame.loc[missing_price, "manual_current_price"] = frame.loc[missing_price, "current_value_eur"] / frame.loc[missing_price, "quantity"]
     return frame[HOLDING_COLUMNS]

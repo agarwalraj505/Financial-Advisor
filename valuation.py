@@ -70,11 +70,14 @@ def valuate_holdings(
         manual = float(row.get("manual_current_price", 0) or 0)
         quantity = float(row.get("quantity", 0) or 0)
         quote = quotes.get(symbol)
-        live = float(quote.latest_price) if quote and quote.is_available else 0.0
+        stored_live = float(row.get("live_current_price", 0) or 0)
+        live = float(quote.latest_price) if quote and quote.is_available else stored_live
         currency = normalise_currency(quote.currency if quote and quote.currency else row.get("currency", "") or "EUR")
         fx_rate = float(fx_rates.get(currency, row.get("fx_rate_to_eur", 1) or 1))
-        if live > 0:
+        if quote and quote.is_available:
             price, source = live, "Live"
+        elif stored_live > 0:
+            price, source = stored_live, "Cached live"
         elif manual > 0:
             price, source = manual, "Manual fallback"
             # Manual prices are entered in the row's stated currency.
@@ -83,14 +86,16 @@ def valuate_holdings(
         value = calculate_position_value(quantity, price, fx_rate)
         buy_in = float(row.get("buy_in_value_eur", 0) or 0)
         profit = value - buy_in
-        previous = float(quote.previous_close) if quote and quote.previous_close else 0.0
+        previous = (float(quote.previous_close) if quote and quote.previous_close
+                    else float(row.get("previous_close", 0) or 0))
         daily_gain = calculate_position_value(quantity, price - previous, fx_rate) if previous else 0.0
         row.update({"live_current_price": live, "price_source": source, "currency": currency,
                     "fx_rate_to_eur": fx_rate, "current_value_eur": value,
                     "pl_eur": round(profit, 2), "pl_pct": round(profit / buy_in * 100, 2) if buy_in else 0.0,
                     "previous_close": previous, "daily_gain_eur": daily_gain,
                     "daily_gain_pct": round((price / previous - 1) * 100, 2) if previous else 0.0,
-                    "price_error": quote.error if quote else ("Missing price symbol" if not symbol else "Live price unavailable")})
+                    "price_error": (quote.error if quote else "" if stored_live > 0
+                                    else "Missing price symbol" if not symbol else "Live price unavailable")})
         rows.append(row)
     return pd.DataFrame(rows)
 

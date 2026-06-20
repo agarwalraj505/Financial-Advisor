@@ -4,16 +4,29 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+import json
+from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 import streamlit as st
 import yfinance as yf
 
-RSS_FEEDS = [
-    ("ECB", "https://www.ecb.europa.eu/rss/press.html", "Interest rates / central banks"),
-    ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/", "Crypto"),
-]
+from news_sources import GDELT_QUERY, MARKET_THEMES, RSS_SOURCES
+
+RSS_FEEDS = RSS_SOURCES
+
+
+def _normalise_gdelt_timestamp(value: str) -> str:
+    """Convert GDELT's compact timestamp into a Postgres-friendly ISO value."""
+    text = str(value or "").strip()
+    for pattern in ("%Y%m%dT%H%M%SZ", "%Y%m%d%H%M%S"):
+        try:
+            parsed = datetime.strptime(text, pattern).replace(tzinfo=timezone.utc)
+            return parsed.isoformat(timespec="seconds")
+        except ValueError:
+            pass
+    return text
 
 
 def normalize_news_item(item: dict) -> dict:
@@ -38,7 +51,7 @@ def deduplicate_news(items: list[dict]) -> list[dict]:
 
 def _read_rss(source: str, url: str, category: str) -> list[dict]:
     try:
-        with urlopen(Request(url, headers={"User-Agent": "wealth-manager/1.0"}), timeout=15) as response:
+        with urlopen(Request(url, headers={"User-Agent": "wealth-manager/1.0"}), timeout=10) as response:
             root = ET.fromstring(response.read(2_000_000))
         items = []
         for node in root.findall(".//item")[:30]:
@@ -50,15 +63,35 @@ def _read_rss(source: str, url: str, category: str) -> list[dict]:
         return []
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+def get_gdelt_news(query: str = GDELT_QUERY, max_records: int = 50) -> list[dict]:
+    """Best-effort public GDELT DOC API; empty list on timeout/rate limit."""
+    try:
+        url = ("https://api.gdeltproject.org/api/v2/doc/doc?query=" + quote_plus(query) +
+               f"&mode=ArtList&maxrecords={min(75, max_records)}&format=json&sort=HybridRel")
+        with urlopen(Request(url, headers={"User-Agent": "wealth-manager/1.0"}), timeout=10) as response:
+            body = json.loads(response.read(3_000_000).decode("utf-8", errors="ignore"))
+        items = []
+        for article in body.get("articles", []):
+            title = article.get("title", ""); lower = title.lower()
+            themes = [theme for theme in MARKET_THEMES if theme.lower().split("/")[0] in lower]
+            items.append({"title": title, "url": article.get("url", ""), "summary": "",
+                          "published_at": _normalise_gdelt_timestamp(article.get("seendate", "")),
+                          "source": article.get("domain", "GDELT"),
+                          "category": themes[0] if themes else "Global markets", "related_themes": themes})
+        return deduplicate_news(items)
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_market_news() -> list[dict]:
-    items = []
+    items = get_gdelt_news()
     for source, url, category in RSS_FEEDS:
         items.extend(_read_rss(source, url, category))
     return deduplicate_news(items)
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_asset_news(asset: dict) -> list[dict]:
     symbol = str(asset.get("price_symbol", "") or "")
     if not symbol: return []

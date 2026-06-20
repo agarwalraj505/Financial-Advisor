@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from html.parser import HTMLParser
+from io import BytesIO
+from math import isnan
 import re
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
@@ -12,6 +14,7 @@ from urllib.robotparser import RobotFileParser
 import streamlit as st
 
 from source_ranker import classify_source_url, rank_source_urls
+from rate_limiter import WEB_DOMAIN_LIMITER
 
 USER_AGENT = "wealth-manager/1.0"
 BLOCKED_HOST_HINTS = ["scalable.capital"]
@@ -23,22 +26,32 @@ def can_fetch_url(url: str) -> bool:
         return False
     try:
         robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
-        parser = RobotFileParser(); parser.set_url(robots_url); parser.read()
+        WEB_DOMAIN_LIMITER.acquire(robots_url)
+        with urlopen(Request(robots_url, headers={"User-Agent": USER_AGENT}), timeout=5) as response:
+            robots_text = response.read(500_000).decode("utf-8", errors="ignore")
+        parser = RobotFileParser(); parser.set_url(robots_url); parser.parse(robots_text.splitlines())
         return parser.can_fetch(USER_AGENT, url)
     except Exception:
         return False  # uncertainty is treated conservatively
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=604800, show_spinner=False)
 def fetch_page(url: str) -> str:
     if not can_fetch_url(url):
         return ""
     try:
-        request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
-        with urlopen(request, timeout=20) as response:
+        WEB_DOMAIN_LIMITER.acquire(url)
+        request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml,application/pdf"})
+        with urlopen(request, timeout=12) as response:
             content_type = response.headers.get("Content-Type", "")
-            if "html" not in content_type.lower():
-                return ""
+            if "pdf" in content_type.lower() or str(url).lower().endswith(".pdf"):
+                try:
+                    from pypdf import PdfReader
+                    reader = PdfReader(BytesIO(response.read(8_000_000)))
+                    return " ".join((page.extract_text() or "") for page in reader.pages[:40])
+                except Exception:
+                    return ""
+            if "html" not in content_type.lower(): return ""
             return response.read(2_000_000).decode("utf-8", errors="ignore")
     except Exception:
         return ""
@@ -128,27 +141,36 @@ def scrape_multiple_sources(asset: dict, source_urls: list[str]) -> list[dict]:
 def merge_scraped_metadata(asset: dict, scraped_results: list[dict]) -> dict:
     """Never overwrite entered values. Store suggestions and conflicts instead."""
     output = dict(asset); conflicts = dict(output.get("metadata_conflicts") or {})
-    suggestions = {}
+    suggestions = dict(output.get("enrichment_suggestions") or {})
+    confidence_rank = {"Low": 1, "Medium": 2, "High": 3}
+    def missing(value):
+        return value in (None, "") or (isinstance(value, float) and isnan(value))
     for result in scraped_results:
         for field in ("isin", "price_symbol", "ticker_id", "ter_percent", "fund_size_eur", "replication_method",
                       "distribution_policy", "domicile", "inception_date", "issuer", "factsheet_url",
                       "kid_url", "currency", "asset_type"):
             value = result.get(field)
-            if value in (None, ""): continue
+            if missing(value): continue
             app_field = {"ter_percent": "ter_pct"}.get(field, field)
             existing = output.get(app_field)
-            if existing not in (None, "") and str(existing) != str(value):
+            if not missing(existing) and str(existing) != str(value):
                 conflicts[app_field] = {"entered": existing, "suggested": value,
                                         "source_url": result.get("source_url"),
                                         "confidence": result.get("extraction_confidence")}
-            elif existing in (None, ""):
-                suggestions[app_field] = {"value": value, "source_url": result.get("source_url"),
-                                          "confidence": result.get("extraction_confidence")}
+            elif missing(existing):
+                proposed = {"value": value, "provider": result.get("source_name", "Web enrichment"),
+                            "source_url": result.get("source_url"),
+                            "source_title": result.get("source_name", "Public source"),
+                            "fetched_at": result.get("fetched_at") or datetime.now(timezone.utc).isoformat(),
+                            "confidence": result.get("extraction_confidence", "Low")}
+                current = suggestions.get(app_field, {})
+                if confidence_rank.get(proposed["confidence"], 0) >= confidence_rank.get(current.get("confidence"), 0):
+                    suggestions[app_field] = proposed
     output["metadata_conflicts"] = conflicts
     output["enrichment_suggestions"] = suggestions
     output["web_scrape_sources"] = [item.get("source_url") for item in scraped_results if item.get("source_url")]
     output["web_scrape_confidence"] = max((item.get("extraction_confidence", "Low") for item in scraped_results),
-                                          key=lambda value: {"Low": 1, "Medium": 2, "High": 3}.get(value, 0), default="Low")
+                                          key=lambda value: confidence_rank.get(value, 0), default="Low")
     output["web_scrape_status"] = "Success" if suggestions or conflicts else "Failed"
     output["web_scrape_last_run"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return output

@@ -51,6 +51,47 @@ The app enriches every holding and candidate through a free-data waterfall:
 
 User-entered values are never silently overwritten. Conflicts are stored as suggestions with source, timestamp, method, and confidence.
 
+### Free-source waterfall
+
+- Identifiers: entered values → unauthenticated OpenFIGI mapping/name search → bounded Yahoo candidates → public search → permitted issuer/aggregator pages → manual repair.
+- Prices: entered fallback → exact yfinance symbol → cached symbol candidates → conservative Stooq fallback → crypto yfinance/CoinGecko → manual fallback.
+- FX: ECB Data Portal → yfinance pair → confirmed manual FX.
+- Fund facts: entered facts → yfinance metadata → issuer factsheet/KID HTML or PDF → permitted ETF aggregator → manual confirmation.
+- News: public GDELT DOC API → configured RSS → yfinance asset news → relevance ranking and transparent sentiment.
+
+Sources can time out, rate-limit, omit fields, or disagree. The app therefore maximizes legal free coverage but never claims completeness or invents a value.
+
+## Data Coverage Dashboard
+
+The **Market → Data Coverage** section calculates price, metadata, TER/cost, FX, factsheet, news, valuation-ready, and recommendation-ready percentages from cached data. It does not make network calls. The Data Gap Report lists every unresolved field, sources already tried, last attempt, failure reason, and suggested next action.
+
+Coverage guardrails:
+
+- Price coverage below 90% displays a valuation caution.
+- Metadata coverage below 75% reduces strategy/scoring confidence.
+- TER coverage below 75% blocks buy/add for ETF candidates that are not recommendation-ready.
+- Existing holdings may remain Hold / Review when TER is missing; missing metadata alone never forces a sale.
+
+## Deep Data Scan
+
+Deep scans are deliberately chunked for Streamlit Community Cloud. The default chunk processes at most five incomplete/stale assets with up to four workers. Fresh complete assets are skipped. Symbol resolution, price/history, FX, OpenFIGI, safe factsheet metadata, news inputs, source audit, failures, and job progress are saved after each completed asset. Use **Continue Deep Scan** for the next chunk.
+
+Streamlit Cloud does not guarantee durable background jobs. Keep the Market page open while a chunk runs; closing or rerunning the page does not lose already saved results.
+
+## Caching, timeouts, and rate limits
+
+- Prices: stale after 15 minutes.
+- FX: stale after 12 hours.
+- Metadata: stale after 7 days.
+- TER/factsheets: stale after 30 days.
+- News: stale after 60 minutes.
+- Bad symbols: not retried for 7 days.
+- Price/provider timeout target: 8 seconds; web search: 10 seconds; scrape: 12 seconds per URL.
+- OpenFIGI unauthenticated requests: batches of at most five ISINs and at most 20 requests per minute.
+- Web scraping: at most one request per second per domain, subject to robots/access checks.
+
+Ordinary page visits load last-known Supabase values. Use **Quick refresh prices**, **Repair missing symbols**, **Deep metadata scan**, or **Refresh news & sentiment** only when needed.
+
 ## 2. No paid API key mode
 
 Only these Streamlit secrets are required:

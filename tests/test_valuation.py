@@ -32,6 +32,12 @@ def test_manual_price_fallback():
     assert valued.loc[0, "price_source"] == "Manual fallback"
 
 
+def test_cached_live_price_is_used_without_network_quote():
+    valued = valuate_holdings(holding(live_current_price=11, manual_current_price=9), {}, {"EUR": 1})
+    assert valued.loc[0, "current_value_eur"] == 22
+    assert valued.loc[0, "price_source"] == "Cached live"
+
+
 def test_non_eur_conversion_logic():
     quote = MarketQuote("TEST", latest_price=50, currency="USD")
     valued = valuate_holdings(holding(currency="USD"), {"TEST": quote}, {"USD": 0.8})
