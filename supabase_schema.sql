@@ -258,6 +258,18 @@ alter table public.market_data_cache
   add column if not exists fetched_at timestamptz default now(),
   add column if not exists expires_at timestamptz;
 
+create table if not exists public.rebalancer_rulebook_versions (
+  id uuid primary key default gen_random_uuid(), user_id text not null,
+  version_name text, created_at timestamptz default now(), rulebook jsonb,
+  confirmed_baseline jsonb, active boolean default false
+);
+
+create table if not exists public.rebalance_guardrail_checks (
+  id uuid primary key default gen_random_uuid(), user_id text not null,
+  rebalance_run_id uuid, created_at timestamptz default now(),
+  check_name text, passed boolean, notes text
+);
+
 create index if not exists holdings_user_idx on public.holdings(user_id);
 create index if not exists candidates_user_idx on public.candidate_assets(user_id);
 create index if not exists savings_user_idx on public.savings_plans(user_id);
@@ -272,6 +284,8 @@ create index if not exists source_audit_user_idx on public.data_source_audit(use
 create index if not exists provider_failures_user_idx on public.provider_failures(user_id, created_at desc);
 create index if not exists enrichment_jobs_user_idx on public.enrichment_jobs(user_id, updated_at desc);
 create index if not exists market_cache_user_idx on public.market_data_cache(user_id, expires_at);
+create index if not exists rulebook_versions_user_idx on public.rebalancer_rulebook_versions(user_id, created_at desc);
+create index if not exists guardrail_checks_user_idx on public.rebalance_guardrail_checks(user_id, created_at desc);
 create unique index if not exists symbol_cache_user_asset_uidx
   on public.symbol_resolution_cache(user_id, asset_key);
 create unique index if not exists market_cache_user_key_uidx
@@ -291,6 +305,8 @@ alter table public.data_source_audit enable row level security;
 alter table public.provider_failures enable row level security;
 alter table public.enrichment_jobs enable row level security;
 alter table public.market_data_cache enable row level security;
+alter table public.rebalancer_rulebook_versions enable row level security;
+alter table public.rebalance_guardrail_checks enable row level security;
 
 create or replace function public.request_user_id()
 returns text language sql stable as $$
@@ -302,7 +318,8 @@ declare table_name text;
 begin
   foreach table_name in array array['holdings','candidate_assets','savings_plans',
     'valuation_snapshots','recommendations','app_settings','market_news','strategy_snapshots','rebalance_runs',
-    'symbol_resolution_cache','data_source_audit','provider_failures','enrichment_jobs','market_data_cache']
+    'symbol_resolution_cache','data_source_audit','provider_failures','enrichment_jobs','market_data_cache',
+    'rebalancer_rulebook_versions','rebalance_guardrail_checks']
   loop
     execute format('drop policy if exists streamlit_mvp_access on public.%I', table_name);
     execute format(

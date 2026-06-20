@@ -227,12 +227,29 @@ class Database:
         return pd.DataFrame(self.gateway.select("strategy_snapshots", {"user_id": self.user_id},
                                                 order="created_at", desc=True))
 
-    def save_rebalance_run(self, run: dict) -> None:
+    def save_rebalance_run(self, run: dict) -> dict | None:
         allowed = {"run_status", "strategy_snapshot", "valuation_snapshot", "recommendations",
                    "savings_plan_changes", "news_inputs", "sentiment_summary", "warnings"}
         payload = {key: clean_value(value) for key, value in run.items() if key in allowed}
         payload["user_id"] = self.user_id
-        self.gateway.insert("rebalance_runs", payload)
+        rows = self.gateway.insert("rebalance_runs", payload)
+        return rows[0] if rows else None
+
+    def save_rulebook_version(self, version_name: str, rulebook: dict,
+                              confirmed_baseline: dict) -> dict | None:
+        self.gateway.update("rebalancer_rulebook_versions", {"active": False}, {"user_id": self.user_id})
+        rows = self.gateway.insert("rebalancer_rulebook_versions", {
+            "user_id": self.user_id, "version_name": version_name,
+            "rulebook": clean_value(rulebook), "confirmed_baseline": clean_value(confirmed_baseline),
+            "active": True})
+        return rows[0] if rows else None
+
+    def save_guardrail_checks(self, checks: list[dict], rebalance_run_id: str | None = None) -> None:
+        rows = [{"user_id": self.user_id, "rebalance_run_id": rebalance_run_id,
+                 "check_name": str(item.get("check_name", "")),
+                 "passed": bool(item.get("passed", False)), "notes": str(item.get("notes", ""))}
+                for item in checks]
+        if rows: self.gateway.insert("rebalance_guardrail_checks", rows)
 
     def load_rebalance_runs(self) -> pd.DataFrame:
         return pd.DataFrame(self.gateway.select("rebalance_runs", {"user_id": self.user_id},
@@ -249,7 +266,9 @@ class Database:
     def save_symbol_resolution(self, row: dict) -> None:
         payload = {key: clean_value(value) for key, value in row.items() if key in {
             "asset_key", "isin", "instrument", "chosen_symbol", "candidate_symbols", "bad_symbols",
-            "confidence", "source", "last_tested", "error"}}
+            "confidence", "source", "last_tested", "error", "alpha_vantage_symbol",
+            "alpha_vantage_candidates", "alpha_vantage_error", "alpha_vantage_symbol_confidence",
+            "alpha_vantage_last_tested"}}
         payload["user_id"] = self.user_id
         self.gateway.upsert("symbol_resolution_cache", payload, on_conflict="user_id,asset_key")
 

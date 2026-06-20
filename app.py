@@ -22,12 +22,20 @@ from data_gap_report import generate_data_gap_report
 from market_data import MarketQuote, get_fx_rate_to_eur, get_market_quote
 from market_data_engine import MarketDataEngine
 from market_research import build_market_research
-from master_rebalance import run_full_rebalance_pipeline
+from master_rebalance import PIPELINE_LABELS, run_full_rebalance_pipeline
 from metadata_enrichment import accept_suggestion
 from news_provider import deduplicate_news, get_asset_news, get_market_news, rank_news_by_relevance
 from optimizer import generate_market_aware_recommendations, recommendation_execution_order
 from provider_registry import get_provider_registry
-from recommendation_engine import build_recommendation_report
+from recommendation_engine import build_recommendation_report, build_structured_rebalance_report
+from rebalancer_rulebook import (BROKER_RULES, CONFIRMED_BASELINE_DATE, CONFIRMED_BASELINE_SOURCE,
+                                 CURRENT_RULEBOOK, DIRECT_TRADE_RULES, REBALANCE_WORKFLOW,
+                                 SAVINGS_PLAN_RULES, THEMES_REQUIRED_FOR_REVIEW)
+from rulebook_engine import (create_execution_order, create_rebalance_checklist,
+                             format_allocation_table, format_immediate_buy_sell_table,
+                             format_savings_plan_table, get_base_target_allocation,
+                             get_confirmed_baseline_holdings, get_confirmed_savings_plan,
+                             validate_rebalance_guardrails)
 from rebalancer import (allocation_table, calculate_allocation, calculate_drift, calculate_total_invested,
                         calculate_total_value, calculate_unrealised_pl, holdings_to_dataframe)
 from sample_data import (CANDIDATE_COLUMNS, SAMPLE_CANDIDATES, SAMPLE_HOLDINGS, SAMPLE_SAVINGS_PLANS,
@@ -170,13 +178,16 @@ def initialise_state(database: Database):
     db_candidates = database.load_candidates()
     db_plans = database.load_savings_plans()
     saved_settings = database.load_settings()
-    app_settings = {"base_currency": "EUR", "monthly_savings_budget": 300.0,
+    app_settings = {"base_currency": "EUR", "monthly_savings_budget": SAVINGS_PLAN_RULES["monthly_budget_eur"],
                     "max_single_holding_weight": 25.0, "max_crypto_weight": 5.0,
                     "cash_min_pct": 0.0, "cash_max_pct": 2.0,
-                    "direct_trade_minimum": 250.0, "small_trade_round_trip_fee": 1.98,
+                    "direct_trade_minimum": DIRECT_TRADE_RULES["minimum_efficient_trade_eur"],
+                    "small_trade_round_trip_fee": DIRECT_TRADE_RULES["below_threshold_fee_eur"],
                     "live_enabled": True, "scraping_enabled": True, "news_enabled": True,
                     "rate_limit_seconds": 0.25, "refresh_interval": 300, "risk_profile": "Aggressive"}
     app_settings.update({key: value for key, value in saved_settings.items() if key in app_settings})
+    app_settings["direct_trade_minimum"] = DIRECT_TRADE_RULES["minimum_efficient_trade_eur"]
+    app_settings["small_trade_round_trip_fee"] = DIRECT_TRADE_RULES["below_threshold_fee_eur"]
     try: provider_failures = database.load_provider_failures()
     except (AttributeError, SupabaseConnectionError): provider_failures = []
     try: deep_job = database.load_active_enrichment_job()
@@ -1324,6 +1335,64 @@ def _save_current_valuation_snapshot():
     return snapshot
 
 
+def _theme_ranking() -> pd.DataFrame:
+    assets = pd.concat([st.session_state.scored_current, st.session_state.scored_candidates],
+                       ignore_index=True, sort=False)
+    if assets.empty:
+        return pd.DataFrame(columns=["Theme", "Average score", "Assets"])
+    assets["_theme"] = assets.get("theme", assets.get("category", "Other")).fillna("").replace("", "Other")
+    score = pd.to_numeric(assets.get("total_score", 0), errors="coerce").fillna(0)
+    assets["_score"] = score
+    return (assets.groupby("_theme", as_index=False).agg(**{"Average score": ("_score", "mean"),
+                                                            "Assets": ("_theme", "size")})
+            .rename(columns={"_theme": "Theme"}).sort_values("Average score", ascending=False).round(2))
+
+
+def _rulebook_context() -> dict:
+    recommendations = st.session_state.recommendations
+    direct = format_immediate_buy_sell_table(recommendations)
+    bought = recommendations[recommendations.get("Action", pd.Series(dtype=str)).astype(str).str.contains("buy", case=False)] if not recommendations.empty else pd.DataFrame()
+    watchlisted = recommendations[recommendations.get("Action", pd.Series(dtype=str)).astype(str).str.contains("watchlist|no trade", case=False, regex=True)] if not recommendations.empty else pd.DataFrame()
+    return {"baseline_source": "Latest saved Supabase holdings; confirmed rulebook baseline is the reset reference",
+            "last_recommendation_assumed_implemented": False,
+            "market_data_refreshed": bool(st.session_state.get("last_price_fetch")),
+            "news_refreshed": bool(st.session_state.get("news_items")),
+            "themes_considered": list(THEMES_REQUIRED_FOR_REVIEW),
+            "regions_considered": st.session_state.strategy.get("regions_considered", []),
+            "themes_bought": bought.get("Instrument", pd.Series(dtype=str)).astype(str).tolist(),
+            "themes_watchlisted": watchlisted.get("Instrument", pd.Series(dtype=str)).astype(str).tolist(),
+            "trades": direct.to_dict("records"), "savings_plan_reviewed": True,
+            "scalable_price_check_required": True, "emotional_selling": False,
+            "popularity_only_buying": False,
+            "price_coverage": calculate_data_coverage(st.session_state.scored_current,
+                                                       st.session_state.scored_candidates).get("price_coverage", 0)}
+
+
+def _build_rulebook_report() -> dict:
+    recommendations = st.session_state.recommendations
+    ordered = recommendation_execution_order(recommendations)
+    sells = ordered[ordered.get("Action", pd.Series(dtype=str)).astype(str).str.contains("sell|liquidate", case=False, regex=True)] if not ordered.empty else pd.DataFrame()
+    buys = ordered[ordered.get("Action", pd.Series(dtype=str)).astype(str).str.contains("buy", case=False)] if not ordered.empty else pd.DataFrame()
+    execution = create_execution_order(sells, buys, st.session_state.optimized_savings)
+    gaps = generate_data_gap_report(st.session_state.scored_current, st.session_state.scored_candidates,
+                                    st.session_state.get("provider_failures", []),
+                                    st.session_state.get("symbol_resolution_cache", []))
+    watchlist = recommendations[recommendations.get("Action", pd.Series(dtype=str)).astype(str).str.contains(
+        "watchlist|no trade", case=False, regex=True)] if not recommendations.empty else pd.DataFrame()
+    context = _rulebook_context()
+    report = build_structured_rebalance_report(
+        strategy=st.session_state.strategy, theme_ranking=_theme_ranking(),
+        target_review=st.session_state.drift, gap_analysis=gaps,
+        recommendations=recommendations, execution_order=execution,
+        savings_plans=st.session_state.optimized_savings,
+        allocation=st.session_state.drift, watchlist=watchlist,
+        market_reasoning=st.session_state.get("market_reasoning_notes") or st.session_state.strategy.get("reasoning", ""),
+        context=context)
+    st.session_state.rulebook_report = report
+    st.session_state.rulebook_guardrails = validate_rebalance_guardrails(context)
+    return report
+
+
 def rebalance_section():
     render_flash_message()
     render_page_header("Rebalance", "One evidence-led superflow for prices, metadata, news, strategy, allocation, savings plans, and execution planning.",
@@ -1348,9 +1417,7 @@ def rebalance_section():
         "Short market reasoning notes",
         value=st.session_state.get("market_reasoning_notes", ""),
         placeholder="Add your own interpretation, constraints, tax notes, or reasons to defer execution.")
-    flow_labels = ["Refreshing prices", "Enriching missing data", "Reading market news",
-                   "Calculating sentiment", "Refreshing strategy", "Running portfolio optimizer",
-                   "Running savings-plan optimizer", "Building execution checklist", "Saving report"]
+    flow_labels = list(PIPELINE_LABELS)
     flow_state = st.session_state.get("rebalance_flow_status", ["Pending"] * len(flow_labels))
     flow_slot = st.empty()
     def draw_flow():
@@ -1361,11 +1428,10 @@ def rebalance_section():
     if st.button("Run Full Rebalance", type="primary", use_container_width=True):
         flow_state = ["Pending"] * len(flow_labels); st.session_state.rebalance_flow_status = flow_state
         progress = st.progress(0, "Starting Market Data Engine...")
-        flow_map = {"refresh_prices": 0, "enrich_assets": 1, "repair_missing_metadata": 1,
-                    "fetch_news": 2, "calculate_sentiment": 3, "redesign_strategy": 4,
-                    "recalculate_valuation": 5, "recalculate_drift": 5, "score_assets": 5,
-                    "run_portfolio_optimizer": 5, "run_savings_optimizer": 6,
-                    "create_report": 7, "create_execution_checklist": 7, "save_run": 8}
+        flow_map = {name: index for index, name in enumerate([
+            "refresh_prices", "enrich_missing_data", "read_news", "fresh_market_research",
+            "calculate_sentiment", "refresh_strategy", "theme_ranking", "target_allocation_review",
+            "portfolio_gap_analysis", "buy_sell_plan", "savings_plan_changes", "execution_order"])}
         def progress_step(name, fraction, function):
             def wrapped(results):
                 flow_state[flow_map[name]] = "Running"; draw_flow()
@@ -1375,21 +1441,24 @@ def rebalance_section():
                 except Exception:
                     flow_state[flow_map[name]] = "Failed"; draw_flow(); raise
             return wrapped
+        def enrich_missing(_):
+            symbols = _repair_symbols_on_demand()
+            metadata = _run_deep_scan_chunk(5)
+            return {"symbols": symbols, "metadata": metadata}
         steps = {
-            "refresh_prices": progress_step("refresh_prices", .06, lambda _: refresh_live_data(True)),
-            "enrich_assets": progress_step("enrich_assets", .13, lambda _: _repair_symbols_on_demand()),
-            "repair_missing_metadata": progress_step("repair_missing_metadata", .20, lambda _: _run_deep_scan_chunk(5)),
-            "fetch_news": progress_step("fetch_news", .28, lambda _: _refresh_news_and_strategy(False)),
-            "calculate_sentiment": progress_step("calculate_sentiment", .35, lambda _: st.session_state.sentiment),
-            "redesign_strategy": progress_step("redesign_strategy", .42, lambda _: _refresh_news_and_strategy(True)),
-            "recalculate_valuation": progress_step("recalculate_valuation", .50, lambda _: recompute_models()),
-            "recalculate_drift": progress_step("recalculate_drift", .57, lambda _: st.session_state.drift.to_dict("records")),
-            "score_assets": progress_step("score_assets", .64, lambda _: recompute_models()),
-            "run_portfolio_optimizer": progress_step("run_portfolio_optimizer", .71, lambda _: st.session_state.recommendations.to_dict("records")),
-            "run_savings_optimizer": progress_step("run_savings_optimizer", .78, lambda _: st.session_state.optimized_savings.to_dict("records")),
-            "create_report": progress_step("create_report", .85, lambda _: st.session_state.recommendation_report.to_dict("records")),
-            "create_execution_checklist": progress_step("create_execution_checklist", .92, lambda _: create_savings_plan_execution_checklist(st.session_state.plans, st.session_state.optimized_savings).to_dict("records")),
-            "save_run": progress_step("save_run", 1.0, lambda results: _save_master_run(results)),
+            "refresh_prices": progress_step("refresh_prices", 1 / 12, lambda _: refresh_live_data(True)),
+            "enrich_missing_data": progress_step("enrich_missing_data", 2 / 12, enrich_missing),
+            "read_news": progress_step("read_news", 3 / 12, lambda _: _refresh_news_and_strategy(False)),
+            "fresh_market_research": progress_step("fresh_market_research", 4 / 12, lambda _: recompute_models()),
+            "calculate_sentiment": progress_step("calculate_sentiment", 5 / 12, lambda _: st.session_state.sentiment),
+            "refresh_strategy": progress_step("refresh_strategy", 6 / 12, lambda _: _refresh_news_and_strategy(True)),
+            "theme_ranking": progress_step("theme_ranking", 7 / 12, lambda _: _theme_ranking().to_dict("records")),
+            "target_allocation_review": progress_step("target_allocation_review", 8 / 12, lambda _: st.session_state.targets),
+            "portfolio_gap_analysis": progress_step("portfolio_gap_analysis", 9 / 12, lambda _: st.session_state.drift.to_dict("records")),
+            "buy_sell_plan": progress_step("buy_sell_plan", 10 / 12, lambda _: (recompute_models(), st.session_state.recommendations.to_dict("records"))[1]),
+            "savings_plan_changes": progress_step("savings_plan_changes", 11 / 12, lambda _: st.session_state.optimized_savings.to_dict("records")),
+            "execution_order": progress_step("execution_order", 1.0, lambda _: _build_rulebook_report()["Execution order"].to_dict("records")),
+            "save_run": lambda results: _save_master_run(results),
         }
         run = run_full_rebalance_pipeline(steps)
         st.session_state.last_rebalance_run = run
@@ -1397,37 +1466,92 @@ def rebalance_section():
         progress.empty()
         if run["warnings"]: render_alert(run["run_status"] + ": " + "; ".join(run["warnings"]), "warning")
         else: safe_toast("Full rebalance completed", "✅")
-    render_rebalance_summary(st.session_state.recommendations)
-    rebalance_engine()
-    render_section_card("Execution order", "Sells first, then cash-limited buys; lower-priority actions are deferred when funding is insufficient.")
-    execution = recommendation_execution_order(st.session_state.recommendations)
-    if execution.empty: render_empty_state("No execution steps", "Run the full rebalance to create an ordered checklist.")
-    else: safe_dataframe(execution[[column for column in ["Step", "Action", "Instrument", "Quantity", "Est. value", "Fee issue"] if column in execution]],
-                         width="stretch", hide_index=True)
-    savings_plan_page()
-    render_section_card("Manual Scalable checklist", "These rows must be reviewed and applied manually in Scalable Capital.")
+    report = _build_rulebook_report()
+    render_section_card("1. Market and strategy refresh")
+    render_strategy_summary_card(report["Market and strategy refresh"])
+    render_alert(st.session_state.sentiment.get("explanation", "Sentiment evidence remains incomplete."), "info")
+
+    render_section_card("2. Theme / sector ranking")
+    safe_dataframe(report["Theme / sector ranking"], width="stretch", hide_index=True)
+
+    render_section_card("3. Target allocation review")
+    safe_dataframe(report["Target allocation review"], width="stretch", hide_index=True)
+
+    render_section_card("4. Portfolio gap analysis")
+    if report["Portfolio gap analysis"].empty:
+        render_empty_state("No unresolved gaps", "Current cached records satisfy the gap checks.")
+    else:
+        safe_dataframe(report["Portfolio gap analysis"], width="stretch", hide_index=True)
+
+    render_section_card("5. Immediate buy/sell table")
+    safe_dataframe(report["Immediate buy/sell table"], width="stretch", hide_index=True)
+
+    render_section_card("6. Execution order", "Sells fund buys first; savings-plan changes remain manual.")
+    if report["Execution order"].empty:
+        render_empty_state("No execution steps", "No fee-efficient immediate trade is justified.")
+    else:
+        safe_dataframe(report["Execution order"], width="stretch", hide_index=True)
     manual_checklist = create_savings_plan_execution_checklist(st.session_state.plans, st.session_state.optimized_savings)
-    if manual_checklist.empty: render_empty_state("No savings-plan changes", "The current optimizer output does not require a manual plan update.")
-    else: safe_dataframe(manual_checklist, width="stretch", hide_index=True)
-    render_section_card("Allocation before and after", "Current exposure against the target policy after considering the recommendation set.")
-    allocation_summary = allocation_table(st.session_state.drift)
-    safe_dataframe(allocation_summary, width="stretch", hide_index=True)
+    with st.expander("Manual Scalable execution checklist"):
+        if manual_checklist.empty: render_empty_state("No savings-plan changes", "No manual plan update is currently required.")
+        else: safe_dataframe(manual_checklist, width="stretch", hide_index=True)
+
+    render_section_card("7. Savings-plan adjustment table")
+    safe_dataframe(report["Savings-plan adjustment table"], width="stretch", hide_index=True)
+    with st.expander("Edit and approve savings-plan records"):
+        savings_plan_page()
+
+    render_section_card("8. Allocation table")
+    safe_dataframe(report["Allocation table"], width="stretch", hide_index=True)
+
+    render_section_card("9. Themes considered but rejected / watchlisted")
+    watchlist = report["Themes considered but rejected / watchlisted"]
+    if isinstance(watchlist, pd.DataFrame) and not watchlist.empty:
+        safe_dataframe(watchlist, width="stretch", hide_index=True)
+    else:
+        render_empty_state("No explicit watchlist rows", "The rulebook theme universe was reviewed; no additional asset passed watchlist gates.")
+
+    render_section_card("10. Short market reasoning")
+    render_alert(str(report["Short market reasoning"] or "Evidence is incomplete; do not force a trade."), "info")
+
+    render_section_card("11. Skip conditions / when not to execute")
+    for condition in report["Skip conditions / when not to execute"]:
+        st.markdown(f"- {condition}")
+    guardrails = st.session_state.rulebook_guardrails
+    failed_checks = [item for item in guardrails["checks"] if not item["passed"]]
+    render_alert("All rulebook guardrails passed." if not failed_checks else
+                 f"{len(failed_checks)} guardrail checks remain incomplete; treat recommendations as estimated.",
+                 "success" if not failed_checks else "warning")
+    with st.expander("Guardrail checklist"):
+        safe_dataframe(pd.DataFrame(guardrails["checks"]), width="stretch", hide_index=True)
     with st.expander("Recommendation report and source detail", expanded=False): recommendation_report_page()
 
 
 def _save_master_run(results):
     valuation_snapshot = _save_current_valuation_snapshot()
+    _build_rulebook_report()
     database.save_strategy_snapshot(st.session_state.strategy)
     database.save_recommendations(st.session_state.recommendation_report)
+    guardrails = st.session_state.rulebook_guardrails
+    failed_guardrails = [item["check_name"] for item in guardrails["checks"] if not item["passed"]]
     payload = {"run_status": "Completed", "strategy_snapshot": st.session_state.strategy,
                "valuation_snapshot": valuation_snapshot,
                "recommendations": st.session_state.recommendation_report.to_dict("records"),
                "savings_plan_changes": st.session_state.optimized_savings.to_dict("records"),
                "news_inputs": st.session_state.news_items, "sentiment_summary": st.session_state.sentiment,
                "warnings": st.session_state.enrichment_warnings +
+                           (["Incomplete rulebook guardrails: " + ", ".join(failed_guardrails)] if failed_guardrails else []) +
                            (["User market notes: " + st.session_state.market_reasoning_notes]
                             if st.session_state.get("market_reasoning_notes") else [])}
-    database.save_rebalance_run(payload)
+    saved_run = database.save_rebalance_run(payload)
+    run_id = saved_run.get("id") if isinstance(saved_run, dict) else None
+    try:
+        database.save_guardrail_checks(guardrails["checks"], run_id)
+        database.save_rulebook_version(CURRENT_RULEBOOK.version, CURRENT_RULEBOOK.as_dict(),
+                                       {"holdings": get_confirmed_baseline_holdings().to_dict("records"),
+                                        "savings_plans": get_confirmed_savings_plan().to_dict("records")})
+    except (AttributeError, SupabaseConnectionError) as exc:
+        st.session_state.enrichment_warnings.append(f"Rulebook audit was not saved: {exc}")
     return payload
 
 
@@ -1460,6 +1584,41 @@ def settings_page():
     render_section_card("Data providers", "Alpha Vantage is used when configured; existing free fallbacks remain available.")
     provider_rows = get_provider_registry()
     safe_dataframe(pd.DataFrame(provider_rows), width="stretch", hide_index=True)
+
+    render_section_card("Rebalancer Rulebook", "The versioned policy controlling baseline, guardrails, workflow, execution, and report format.")
+    rulebook_cols = st.columns(3)
+    with rulebook_cols[0]: render_metric_card("Version", CURRENT_RULEBOOK.version)
+    with rulebook_cols[1]: render_metric_card("Baseline date", CONFIRMED_BASELINE_DATE)
+    with rulebook_cols[2]: render_metric_card("Baseline source", CONFIRMED_BASELINE_SOURCE)
+    with st.expander("Base targets and broker rules"):
+        safe_dataframe(pd.DataFrame([{"Category": key, "Target %": value}
+                                     for key, value in get_base_target_allocation().items()]),
+                       width="stretch", hide_index=True)
+        st.markdown("**Broker rules**")
+        for key, value in BROKER_RULES.items(): st.markdown(f"- {key.replace('_', ' ').title()}: {value}")
+    with st.expander("Direct-trade and savings-plan rules"):
+        for key, value in DIRECT_TRADE_RULES.items(): st.markdown(f"- {key.replace('_', ' ').title()}: {value}")
+        st.markdown("**Savings plans**")
+        for key, value in SAVINGS_PLAN_RULES.items(): st.markdown(f"- {key.replace('_', ' ').title()}: {value}")
+    with st.expander("Required workflow and guardrail checklist"):
+        for index, label in enumerate(REBALANCE_WORKFLOW, 1): st.markdown(f"{index}. {label}")
+        checklist = create_rebalance_checklist(_rulebook_context())
+        safe_dataframe(pd.DataFrame(checklist["guardrails"]["checks"]), width="stretch", hide_index=True)
+    reset_col, plan_col = st.columns(2)
+    confirm_baseline = reset_col.checkbox("Confirm overwrite current app holdings", key="confirm_rulebook_baseline")
+    if reset_col.button("Reset app portfolio to confirmed rulebook baseline", disabled=not confirm_baseline,
+                        use_container_width=True):
+        st.session_state.holdings = holdings_to_dataframe(get_confirmed_baseline_holdings().to_dict("records"))
+        st.session_state.targets = get_base_target_allocation()
+        database.save_holdings(st.session_state.holdings)
+        database.save_settings({"target_allocations": st.session_state.targets})
+        recompute_models(); set_flash_success("Confirmed rulebook baseline loaded"); st.rerun()
+    confirm_plans = plan_col.checkbox("Confirm overwrite current app savings plans", key="confirm_rulebook_plans")
+    if plan_col.button("Load rulebook savings plan", disabled=not confirm_plans, use_container_width=True):
+        st.session_state.plans = _plans_with_categories(get_confirmed_savings_plan())
+        database.save_savings_plans(st.session_state.plans)
+        recompute_models(); set_flash_success("Rulebook savings plan loaded"); st.rerun()
+
     render_section_card("Strategy settings", "Long-term allocation and risk guardrails used by the optimizer.")
     a, b, c = st.columns(3)
     s["base_currency"] = a.selectbox("Base currency", ["EUR"])
@@ -1476,8 +1635,10 @@ def settings_page():
     s["max_crypto_weight"] = c.number_input("Max crypto weight %", min_value=0.0, value=float(s["max_crypto_weight"]))
     s["cash_min_pct"] = a.number_input("Cash target minimum %", min_value=0.0, value=float(s["cash_min_pct"]))
     s["cash_max_pct"] = b.number_input("Cash target maximum %", min_value=0.0, value=float(s["cash_max_pct"]))
-    s["direct_trade_minimum"] = c.number_input("Direct trade minimum EUR", min_value=0.0, value=float(s["direct_trade_minimum"]))
-    s["small_trade_round_trip_fee"] = a.number_input("Below-threshold round-trip fee EUR", min_value=0.0, value=float(s["small_trade_round_trip_fee"]))
+    s["direct_trade_minimum"] = c.number_input("Direct trade minimum EUR", min_value=0.0,
+                                                  value=float(DIRECT_TRADE_RULES["minimum_efficient_trade_eur"]), disabled=True)
+    s["small_trade_round_trip_fee"] = a.number_input("Below-threshold assumed trading fee EUR", min_value=0.0,
+                                                        value=float(DIRECT_TRADE_RULES["below_threshold_fee_eur"]), disabled=True)
     intervals = [60, 300, 600, 900]
     current_interval = int(s.get("refresh_interval", 300))
     interval_index = intervals.index(current_interval) if current_interval in intervals else 1
@@ -1495,7 +1656,7 @@ def settings_page():
         total = sum(st.session_state.targets.values())
         if abs(total - 100) < .01: safe_toast("Settings saved", "💾")
         else: render_alert(f"Targets total {total:.2f}%; adjust them to 100%.", "warning")
-    render_section_card("Scalable assumptions", "PRIME+ · Preferred venue EIX/gettex · Avoid Xetra unless needed · €250 direct-trade threshold · €1.98 default below-threshold round trip · Whole units for stocks/ETFs/ETCs/ETPs · Fractional crypto allowed.")
+    render_section_card("Scalable assumptions", "PRIME+ · Preferred venue EIX/gettex · Avoid Xetra unless needed · €250 direct-trade threshold · €0.99 assumed below-threshold trading fee · Whole units for all direct orders · Fractional buying only through savings plans.")
     render_alert("Final prices, availability, fees, taxes, and savings-plan changes must be checked and applied manually in Scalable Capital.", "info")
     render_section_card("Danger zone", "Destructive actions require a separate confirmation and never affect your broker account.")
     danger_a, danger_b, danger_c = st.columns(3)

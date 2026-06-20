@@ -31,7 +31,7 @@ def test_drift_calculation():
 def test_fee_warning_for_trades_below_250():
     warning = fee_warning(249.99)
     assert "Below €250" in warning
-    assert "€1.98 round trip" in warning
+    assert "€0.99" in warning
     assert "€250+" in fee_warning(250)
 
 

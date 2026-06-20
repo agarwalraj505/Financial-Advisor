@@ -195,6 +195,7 @@ def test_full_pipeline_reaches_and_saves_report_stage():
     saved = []
     steps = {name: (lambda results, stage=name: saved.append(stage) if stage == "save_run" else stage)
              for name in PIPELINE_STEPS}
+    steps["save_run"] = lambda results: saved.append("save_run")
     run_full_rebalance_pipeline(steps)
     assert saved == ["save_run"]
 

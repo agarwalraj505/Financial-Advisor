@@ -5,12 +5,14 @@ from __future__ import annotations
 import pandas as pd
 
 from scoring import allocation_bucket
+from rebalancer_rulebook import SAVINGS_PLAN_RULES
+from rulebook_engine import validate_savings_plan_against_rulebook
 
 SAVINGS_COLUMNS = ["Instrument", "ISIN", "Current plan", "New plan", "Action", "Reason", "Score"]
 
 
 def optimize_savings_plans(plans: pd.DataFrame, scored_assets: pd.DataFrame, drift: pd.DataFrame,
-                           monthly_budget: float = 300.0) -> pd.DataFrame:
+                           monthly_budget: float = SAVINGS_PLAN_RULES["monthly_budget_eur"]) -> pd.DataFrame:
     score_lookup = scored_assets.drop_duplicates("isin").set_index("isin").to_dict("index") if not scored_assets.empty else {}
     drift_lookup = drift.set_index("category").to_dict("index") if not drift.empty else {}
     current_lookup = plans.set_index("isin")["current_plan"].to_dict() if not plans.empty else {}
@@ -76,4 +78,6 @@ def optimize_savings_plans(plans: pd.DataFrame, scored_assets: pd.DataFrame, dri
         rows.append({"Instrument": "Unallocated monthly budget", "ISIN": "CASH", "Current plan": 0.0,
                      "New plan": round(monthly_budget - allocated_total, 2), "Action": "Hold unallocated",
                      "Reason": "No candidate meets the quality, score, and allocation rules; do not force investment.", "Score": 0.0})
-    return pd.DataFrame(rows, columns=SAVINGS_COLUMNS).sort_values("New plan", ascending=False).reset_index(drop=True)
+    result = pd.DataFrame(rows, columns=SAVINGS_COLUMNS).sort_values("New plan", ascending=False).reset_index(drop=True)
+    result.attrs["rulebook_validation"] = validate_savings_plan_against_rulebook(result, monthly_budget)
+    return result

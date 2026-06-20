@@ -38,3 +38,6 @@ def test_authenticated_portfolio_page_starts_without_paid_keys(monkeypatch):
             assert {"Quick Refresh Prices", "Repair Missing Symbols", "Run Deep Data Scan"}.issubset(labels)
         if section == "Rebalance":
             assert "Run Full Rebalance" in labels
+        if section == "Settings":
+            assert "Reset app portfolio to confirmed rulebook baseline" in labels
+            assert "Load rulebook savings plan" in labels

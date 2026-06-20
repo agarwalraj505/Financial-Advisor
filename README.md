@@ -25,6 +25,12 @@ The sidebar deliberately exposes only five destinations:
 
 The sidebar also shows Supabase connectivity, live-data status, and the latest refresh time.
 
+## Rebalancer Rulebook
+
+`rebalancer_rulebook.py` is the single policy source for the confirmed portfolio baseline, base targets, broker assumptions, €250 direct-trade threshold, €0.99 below-threshold fee assumption, whole-unit direct execution, €300 monthly savings plan, theme/region review universe, workflow order, and required report sections. `rulebook_engine.py` applies those rules through validation, output formatting, execution ordering, and skip conditions.
+
+Open **Settings → Rebalancer Rulebook** to inspect the active version, source, targets, workflow, and guardrails. Loading the confirmed holdings or savings plan requires an explicit confirmation and overwrites app records only—never broker positions. A full rebalance always starts from saved holdings, treats later unimplemented recommendations as unexecuted, refreshes evidence, and may conclude that no immediate trade is justified.
+
 ## Portfolio workflow
 
 1. Open **Portfolio** and review the hero valuation and performance cards.
@@ -166,7 +172,7 @@ Recommendations use Scalable Capital PRIME+ assumptions:
 - Prefer EIX/gettex and avoid Xetra unless specifically needed.
 - Use whole quantities for stocks, ETFs, ETCs, and ETPs; crypto may be fractional.
 - Direct buys below €250 are usually fee-inefficient.
-- The default below-threshold round-trip warning is €1.98.
+- Direct trades below €250 are normally avoided; the rulebook assumes a €0.99 trading fee.
 - Every execution recommendation says to check the live Scalable price.
 
 ## 8. Using Scalable screenshots
@@ -197,7 +203,7 @@ No localhost is needed after deployment.
 
 ## 11. Supabase setup
 
-`supabase_schema.sql` creates holdings, candidate assets, savings plans, valuation snapshots, recommendations, settings, market news, strategy snapshots, rebalance runs, indexes, MVP row-level policies, and a private screenshot bucket.
+`supabase_schema.sql` creates holdings, candidate assets, savings plans, valuation snapshots, recommendations, settings, market news, strategy snapshots, rebalance runs, rulebook versions, guardrail checks, indexes, MVP row-level policies, and a private screenshot bucket.
 
 The password-gated MVP uses `user_id = "default_user"` and passes it from the private Streamlit server in an `x-user-id` header. Before supporting multiple users, migrate to Supabase Auth and `auth.uid()`-based RLS. Never use or expose the Supabase service-role key.
 

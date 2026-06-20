@@ -100,9 +100,10 @@ def calculate_portfolio_totals(holdings: pd.DataFrame) -> dict[str, float]:
                 "unrealized_pl_eur": 0.0, "unrealized_pl_percent": 0.0, "cash_eur": 0.0}
     current = pd.to_numeric(holdings["current_value_eur"], errors="coerce").fillna(0) if "current_value_eur" in holdings else pd.Series(0.0, index=holdings.index)
     invested = pd.to_numeric(holdings["buy_in_value_eur"], errors="coerce").fillna(0) if "buy_in_value_eur" in holdings else pd.Series(0.0, index=holdings.index)
-    total, buy_in = float(current.sum()), float(invested.sum())
-    profit = total - buy_in
     categories = holdings.get("category", pd.Series(index=holdings.index, dtype=str)).astype(str)
+    non_cash = categories != "Cash"
+    total, buy_in = float(current.sum()), float(invested[non_cash].sum())
+    profit = float(current[non_cash].sum()) - buy_in
     cash = float(current[categories == "Cash"].sum())
     return {"total_value_eur": round(total, 2), "invested_value_eur": round(buy_in, 2),
             "unrealized_pl_eur": round(profit, 2),
@@ -132,7 +133,8 @@ def valuate_holdings(
         fx_rate, fx_source = resolve_position_fx(currency, row, fx_rates)
         value = calculate_position_value(quantity, price, fx_rate) if price > 0 and fx_rate > 0 else 0.0
         buy_in = _number(row.get("buy_in_value_eur"))
-        pl = calculate_pl(value, buy_in)
+        pl = ({"pl_eur": 0.0, "pl_percent": 0.0} if str(row.get("category", "")) == "Cash"
+              else calculate_pl(value, buy_in))
         previous = (float(quote.previous_close) if quote and quote.previous_close
                     else _number(row.get("previous_close")))
         daily_gain = calculate_position_value(quantity, price - previous, fx_rate) if previous else 0.0

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from rebalancer_rulebook import (BROKER_RULES, DIRECT_TRADE_RULES, REGIONS_REQUIRED_FOR_REVIEW,
+                                 SAVINGS_PLAN_RULES, THEMES_REQUIRED_FOR_REVIEW)
+
 
 def get_current_strategy(settings: dict, targets: dict, holdings=None, candidates=None) -> dict:
     return {"strategy_name": f"{settings.get('risk_profile', 'Aggressive')} diversified strategy",
@@ -11,7 +14,17 @@ def get_current_strategy(settings: dict, targets: dict, holdings=None, candidate
             "target_allocations": dict(targets), "preferred_themes": [], "reduced_themes": [],
             "overweight_underweight_plan": "Follow allocation drift; do not force trades.",
             "current_risks": ["Free internet prices can be delayed", "Confirm costs and compatibility before new buys"],
-            "savings_plan_priorities": [], "rebalance_rules": ["Do not force trades", "Prefer fee-efficient savings plans"],
+            "savings_plan_priorities": [],
+            "themes_considered": list(THEMES_REQUIRED_FOR_REVIEW),
+            "regions_considered": list(REGIONS_REQUIRED_FOR_REVIEW),
+            "rebalance_rules": [
+                "Whole quantities for direct trades; fractional purchases belong in savings plans",
+                f"Avoid direct trades below €{DIRECT_TRADE_RULES['minimum_efficient_trade_eur']:.0f}",
+                "Sells fund buys before cash-limited execution",
+                f"Prefer {BROKER_RULES['preferred_venue']}; check Scalable live prices",
+                f"Savings-plan budget €{SAVINGS_PLAN_RULES['monthly_budget_eur']:.0f} unless updated",
+                "Do not force trades, sell only because red, or buy only because popular",
+            ],
             "reasoning": "Baseline strategy from saved targets and risk settings.", "confidence": "Medium",
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds")}
 

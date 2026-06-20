@@ -1,11 +1,15 @@
 """Non-personal sample data. Market and fund facts require user verification."""
 
+from copy import deepcopy
+
+from rebalancer_rulebook import (BASE_TARGET_ALLOCATION, CONFIRMED_BASELINE_HOLDINGS,
+                                 CONFIRMED_SAVINGS_PLAN)
+
 SUPPORTED_CATEGORIES = ["Core", "EM", "India", "Growth", "AI", "Semiconductors", "Quality tech",
     "Defence", "Cybersecurity", "Healthcare innovation", "Robotics", "Energy", "Uranium",
     "Power grid/electrification", "Commodities", "Gold", "Silver", "Crypto", "Cash", "Other tactical"]
 
-TARGET_ALLOCATIONS = {"Core": 25.0, "EM": 15.0, "Growth": 40.0, "Defence": 5.0,
-                      "Commodities": 10.0, "Crypto": 5.0, "Cash": 0.0}
+TARGET_ALLOCATIONS = dict(BASE_TARGET_ALLOCATION)
 
 CANDIDATE_COLUMNS = ["instrument", "isin", "wkn", "ticker_id", "price_symbol", "resolved_price_symbol",
     "alpha_vantage_symbol", "alpha_vantage_last_price", "alpha_vantage_previous_close",
@@ -23,28 +27,7 @@ CANDIDATE_COLUMNS = ["instrument", "isin", "wkn", "ticker_id", "price_symbol", "
     "confirmed_by_user", "suggested_price_symbols", "suggested_asset_type", "suggested_category",
     "manual_review_attempted", "last_auto_repair_at", "last_updated_date"]
 
-
-def holding(instrument, isin, ticker, symbol, asset_type, category, quantity, value, buy_in, fractional=False):
-    price, profit = (value / quantity if quantity else 0), value - buy_in
-    return {"instrument": instrument, "isin": isin, "ticker_id": ticker, "price_symbol": symbol,
-            "asset_type": asset_type, "category": category, "quantity": quantity,
-            "manual_current_price": round(price, 4), "live_current_price": 0.0,
-            "price_source": "Manual fallback", "currency": "EUR", "fx_rate_to_eur": 1.0,
-            "current_value_eur": value, "buy_in_value_eur": buy_in, "pl_eur": profit,
-            "pl_pct": round(profit / buy_in * 100, 2) if buy_in else 0,
-            "direct_trading_allowed": True, "fractional_allowed": fractional, "notes": ""}
-
-
-SAMPLE_HOLDINGS = [
-    holding("Scalable MSCI AC World Xtrackers UCITS ETF", "LU2903252349", "ACWI", "SCWX.DE", "ETF", "Core", 61, 724.56, 680),
-    holding("iShares Core MSCI EM IMI UCITS ETF", "IE00BKM4GZ66", "EIMI", "EIMI.L", "ETF", "EM", 9, 452.84, 430),
-    holding("EUWAX Gold II", "DE000EWG2LD7", "EWG2", "EWG2.SG", "ETC", "Commodities", 2, 240.94, 220),
-    holding("Xtrackers Artificial Intelligence & Big Data UCITS ETF", "IE00BGV5VN51", "XAIX", "XAIX.DE", "ETF", "Growth", 1, 216.32, 195),
-    holding("VanEck Semiconductor UCITS ETF", "IE00BMC38736", "SMH", "IE00BMC38736.SG", "ETF", "Growth", 2, 216.16, 190),
-    holding("HANetf Future of Defence UCITS ETF", "IE000OJ5TQP4", "NATO", "ASWC.DE", "ETF", "Defence", 8, 141.58, 125),
-    holding("WisdomTree Physical Crypto Mega Cap", "GB00BMTP1626", "WCRP", "GB00BMTP1626.SG", "ETP", "Crypto", 14, 59.55, 65, True),
-    holding("Cash", "CASH", "CASH", "", "Cash", "Cash", 1, 70.46, 70.46, True),
-]
+SAMPLE_HOLDINGS = deepcopy(CONFIRMED_BASELINE_HOLDINGS)
 
 
 def candidate(instrument, isin, ticker, symbol, asset_type, category, theme, region, currency="EUR"):
@@ -79,15 +62,4 @@ SAMPLE_CANDIDATES = [
     candidate("Uranium / Energy ETF – confirm exact product", "PLACEHOLDER-URANIUM", "URNM", "", "ETF", "Uranium", "Uranium miners", "Global"),
 ]
 
-SAMPLE_SAVINGS_PLANS = [
-    {"instrument": "Scalable MSCI AC World", "isin": "LU2903252349", "category": "Core", "current_plan": 75.0},
-    {"instrument": "iShares Core MSCI EM IMI", "isin": "IE00BKM4GZ66", "category": "EM", "current_plan": 45.0},
-    {"instrument": "VanEck Semiconductor", "isin": "IE00BMC38736", "category": "Semiconductors", "current_plan": 45.0},
-    {"instrument": "Microsoft", "isin": "US5949181045", "category": "Quality tech", "current_plan": 30.0},
-    {"instrument": "ASML", "isin": "NL0010273215", "category": "Semiconductors", "current_plan": 25.0},
-    {"instrument": "Xtrackers AI & Big Data", "isin": "IE00BGV5VN51", "category": "AI", "current_plan": 20.0},
-    {"instrument": "HANetf Future of Defence", "isin": "IE000OJ5TQP4", "category": "Defence", "current_plan": 15.0},
-    {"instrument": "EUWAX Gold II", "isin": "DE000EWG2LD7", "category": "Gold", "current_plan": 25.0},
-    {"instrument": "iShares Physical Silver", "isin": "IE00B4NCWG09", "category": "Silver", "current_plan": 5.0},
-    {"instrument": "WisdomTree Physical Crypto Mega Cap", "isin": "GB00BMTP1626", "category": "Crypto", "current_plan": 15.0},
-]
+SAMPLE_SAVINGS_PLANS = deepcopy(CONFIRMED_SAVINGS_PLAN)

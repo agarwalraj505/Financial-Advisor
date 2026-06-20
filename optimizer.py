@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from scoring import allocation_bucket
+from rebalancer_rulebook import CRYPTO_RULES, DIRECT_TRADE_RULES
+from rulebook_engine import normalize_trade_purpose
 
 OUTPUT_COLUMNS = ["Action", "Purpose", "Instrument", "ISIN", "Ticker/ID", "Quantity",
                   "Est. value", "Fee issue", "Score", "Data confidence", "Reason",
@@ -23,22 +25,24 @@ def _number(value, default=0.0):
 
 
 def _fee_issue(value: float, minimum: float, fee: float) -> str:
-    return (f"Below €{minimum:,.0f}; prefer savings plan. Assumed round trip €{fee:.2f}"
+    return (f"Below €{minimum:,.0f}; prefer savings plan. Assumed trading fee €{fee:.2f}"
             if 0 < value < minimum else "PRIME+ EIX/gettex fee may be avoided; verify manually" if value >= minimum else "No order")
 
 
 def _row(action: str, purpose: str, asset: pd.Series, quantity: float, value: float,
          reason: str, settings: dict) -> dict:
-    fractional = bool(asset.get("fractional_allowed", False))
+    direct_action = any(token in action.lower() for token in ("buy", "sell", "liquidate", "reduce"))
+    output_quantity = ("Full position" if action == DIRECT_TRADE_RULES["fractional_liquidation_instruction"]
+                       else int(quantity) if direct_action else round(quantity, 6))
     price_source = asset.get("price_source") or asset.get("data_source") or "Manual fallback after failed enrichment"
     execution_warning = (
         "Alpha Vantage quote may be end-of-day. Check live Scalable price before execution."
         if str(price_source) == "Alpha Vantage"
         else "Check live Scalable price before execution"
     )
-    return {"Action": action, "Purpose": purpose, "Instrument": asset.get("instrument", ""),
+    return {"Action": action, "Purpose": normalize_trade_purpose(purpose), "Instrument": asset.get("instrument", ""),
             "ISIN": asset.get("isin", ""), "Ticker/ID": asset.get("ticker_id", ""),
-            "Quantity": round(quantity, 6) if fractional else int(quantity), "Est. value": round(value, 2),
+            "Quantity": output_quantity, "Est. value": round(value, 2),
             "Fee issue": _fee_issue(value, settings["direct_trade_minimum"], settings["small_trade_round_trip_fee"]),
             "Score": round(_number(asset.get("total_score")), 2),
             "Data confidence": asset.get("data_confidence", "Low"), "Reason": reason,
@@ -55,9 +59,9 @@ def _row(action: str, purpose: str, asset: pd.Series, quantity: float, value: fl
 def generate_market_aware_recommendations(current: pd.DataFrame, candidates: pd.DataFrame,
                                           drift: pd.DataFrame, settings: dict) -> pd.DataFrame:
     """Recommend sells/holds first, then cash-limited adds and new buys."""
-    minimum = float(settings.get("direct_trade_minimum", 250))
+    minimum = float(DIRECT_TRADE_RULES["minimum_efficient_trade_eur"])
     configured = {"direct_trade_minimum": minimum,
-                  "small_trade_round_trip_fee": float(settings.get("small_trade_round_trip_fee", 1.98)),
+                  "small_trade_round_trip_fee": float(DIRECT_TRADE_RULES["below_threshold_fee_eur"]),
                   "news_sentiment": settings.get("news_sentiment", "Neutral / no material evidence")}
     drift_lookup = drift.set_index("category").to_dict("index") if not drift.empty else {}
     cash = float(settings.get("available_cash_eur", 0))
@@ -74,12 +78,20 @@ def generate_market_aware_recommendations(current: pd.DataFrame, candidates: pd.
         ready = bool(asset.get("recommendation_ready", not bool(asset.get("manual_review_required", False))))
         if status == "Overweight" and score < 6.5 and value > 0 and ready:
             sell_value = min(value, max(abs(drift_eur), minimum))
-            sell_qty = sell_value / price if bool(asset.get("fractional_allowed", False)) and price else floor(sell_value / price) if price else 0
+            sell_qty = floor(sell_value / price) if price else 0
             sell_value = sell_qty * price
-            action = "Sell fully" if sell_qty >= quantity else "Sell partially"
-            rows.append(_row(action, "Reduce weak overweight holding", asset, min(sell_qty, quantity), min(sell_value, value),
-                             "Weak score combined with an overweight category; sale remains optional and tax-sensitive.", configured))
-            cash += min(sell_value, value)
+            if not float(quantity).is_integer() and sell_qty >= floor(quantity):
+                action = DIRECT_TRADE_RULES["fractional_liquidation_instruction"]
+                sell_qty, sell_value = quantity, value
+            else:
+                action = "Sell fully" if sell_qty >= quantity else "Sell partially"
+            if 0 < sell_value < minimum:
+                rows.append(_row("Hold", "Risk reduction", asset, 0, 0,
+                                 "Potential reduction is below the direct-trade threshold; do not force a fee-inefficient sale.", configured))
+            else:
+                rows.append(_row(action, "Risk reduction", asset, min(sell_qty, quantity), min(sell_value, value),
+                                 "Weak score combined with an overweight category; sale remains optional and tax-sensitive.", configured))
+                cash += min(sell_value, value)
         elif status == "Underweight" and score >= 8:
             rows.append(_row("Hold / consider add", "Strong holding in underweight category", asset, 0, 0,
                              "Strong setup, but compare with higher-scoring candidates before adding.", configured))
@@ -129,9 +141,11 @@ def generate_market_aware_recommendations(current: pd.DataFrame, candidates: pd.
         if str(asset.get("category", "")) == "Crypto" and portfolio_total:
             crypto_room = (portfolio_total * _number(settings.get("max_crypto_weight"), 5) / 100 -
                            _number(settings.get("current_crypto_value_eur"), 0))
+            crypto_room = min(crypto_room,
+                              portfolio_total * CRYPTO_RULES["cap_pct"] / 100 -
+                              _number(settings.get("current_crypto_value_eur"), 0))
             desired = min(desired, max(0, crypto_room))
-        fractional = bool(asset.get("fractional_allowed", False))
-        quantity = desired / price if fractional and price else floor(desired / price) if price else 0
+        quantity = floor(desired / price) if price else 0
         value = quantity * price
         if not direct_available:
             action = "Add to savings plan" if bool(asset.get("savings_plan_available", False)) else "No trade"

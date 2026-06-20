@@ -9,7 +9,9 @@ from copy import deepcopy
 import pandas as pd
 from pydantic import BaseModel, Field
 
-MIN_EFFICIENT_ORDER_EUR = 250.0
+from rebalancer_rulebook import DIRECT_TRADE_RULES
+
+MIN_EFFICIENT_ORDER_EUR = DIRECT_TRADE_RULES["minimum_efficient_trade_eur"]
 MATERIAL_DRIFT_PCT = 3.0
 ON_TARGET_DRIFT_PCT = 1.0
 HOLDING_COLUMNS = ["instrument", "isin", "ticker_id", "price_symbol", "alpha_vantage_symbol",
@@ -153,12 +155,14 @@ def calculate_total_value(holdings_df: pd.DataFrame) -> float:
 
 
 def calculate_total_invested(holdings_df: pd.DataFrame) -> float:
-    return round(float(_normalise_holdings(holdings_df)["buy_in_value_eur"].sum()), 2)
+    frame = _normalise_holdings(holdings_df)
+    return round(float(frame.loc[frame["category"] != "Cash", "buy_in_value_eur"].sum()), 2)
 
 
 def calculate_unrealised_pl(holdings_df: pd.DataFrame) -> float:
     frame = _normalise_holdings(holdings_df)
-    return round(float(frame["current_value_eur"].sum() - frame["buy_in_value_eur"].sum()), 2)
+    invested = frame[frame["category"] != "Cash"]
+    return round(float(invested["current_value_eur"].sum() - invested["buy_in_value_eur"].sum()), 2)
 
 
 def calculate_allocation(holdings_df: pd.DataFrame) -> pd.DataFrame:
@@ -194,7 +198,8 @@ def fee_warning(order_value: float, threshold: float = MIN_EFFICIENT_ORDER_EUR) 
     if abs(order_value) == 0:
         return "No order"
     if abs(order_value) < threshold:
-        return f"Below €{threshold:,.0f}: €0.99 buy + €0.99 sell = €1.98 round trip"
+        return (f"Below €{threshold:,.0f}: assumed trading fee "
+                f"€{DIRECT_TRADE_RULES['below_threshold_fee_eur']:.2f}; prefer a savings plan")
     return f"€{threshold:,.0f}+: fees can usually be avoided with PRIME+ on EIX/gettex; verify first"
 
 
