@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import json
 import time
 
 import pandas as pd
@@ -86,6 +87,35 @@ def cached_quote(symbol: str, bucket: int):
 def cached_fx(currency: str, bucket: int):
     rate = get_fx_rate_to_eur(currency)
     return rate, "" if rate else "FX rate unavailable"
+
+
+_STRUCTURED_DISPLAY_COLUMNS = {
+    "conflict", "metadata_conflicts", "provider_status", "enrichment_audit",
+    "web_scrape_sources", "enrichment_suggestions", "suggested_price_symbols",
+    "warnings", "strategy_snapshot", "valuation_snapshot", "recommendations",
+    "savings_plan_changes", "news_inputs", "sentiment_summary",
+}
+
+
+def _display_safe_frame(frame) -> pd.DataFrame:
+    """Return an Arrow-safe copy without changing the stored application data."""
+    safe = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame(frame)
+    for column in safe.columns:
+        values = safe[column]
+        has_nested = values.map(lambda value: isinstance(value, (dict, list, tuple, set))).any()
+        if has_nested or str(column).lower() in _STRUCTURED_DISPLAY_COLUMNS:
+            safe[column] = values.map(
+                lambda value: json.dumps(value, ensure_ascii=False, default=str)
+                if isinstance(value, (dict, list, tuple, set))
+                else "" if value is None or (isinstance(value, float) and pd.isna(value))
+                else str(value)
+            )
+    return safe
+
+
+def safe_dataframe(frame, **kwargs):
+    """Display a DataFrame after serializing nested audit values for Arrow."""
+    return st.dataframe(_display_safe_frame(frame), **kwargs)
 
 
 def _normalise_candidates(frame: pd.DataFrame) -> pd.DataFrame:
@@ -294,7 +324,7 @@ def refresh_live_data(force=False):
         st.session_state.last_price_fetch = max(successful)
     recompute_models()
     try:
-        cache = SupabaseDataCache(database.gateway, user_id)
+        cache = SupabaseDataCache(database.gateway, database.user_id)
         for symbol, quote in quotes.items():
             if quote.is_available:
                 cache.set(f"price:{symbol}", {"latest_price": quote.latest_price,
@@ -392,7 +422,7 @@ def valuation_dashboard():
     chart_left.plotly_chart(holdings_figure, width="stretch", key="valuation_holdings_chart")
     winners = details.sort_values("daily_gain_eur")
     chart_right.plotly_chart(create_winners_losers_chart(winners), width="stretch", key="valuation_winners_chart")
-    st.dataframe(details, width="stretch", hide_index=True)
+    safe_dataframe(details, width="stretch", hide_index=True)
     x, y = st.columns(2)
     x.download_button("Export valuation history CSV", history.to_csv(index=False), "valuation_history.csv", "text/csv")
     confirm = y.checkbox("Confirm clear history")
@@ -518,7 +548,7 @@ def market_research_dashboard():
         columns = [c for c in ["instrument", "category", "trend_status", "momentum_score", "quality_score",
                                "cost_score", "portfolio_fit_score", "total_score", "score_band",
                                "data_confidence", "data_source", "last_updated"] if c in frame]
-        st.dataframe(frame[columns], width="stretch", hide_index=True)
+        safe_dataframe(frame[columns], width="stretch", hide_index=True)
     drift_chart = st.session_state.drift.melt(id_vars="category", value_vars=["current_weight", "target_weight"],
                                                var_name="Allocation", value_name="Weight %")
     st.plotly_chart(create_current_vs_target_chart(drift_chart), width="stretch", key="research_target_chart")
@@ -539,8 +569,8 @@ def asset_quality_dashboard():
         "replication_method", "distribution_policy", "domicile", "manual_spread_estimate_pct",
         "liquidity_score", "quality_score", "quality_confidence", "manual_review_required",
         "missing_critical_data", "quality_reason", "data_source", "source_url", "last_updated"] if c in combined]
-    st.dataframe(combined[columns].sort_values("quality_score", ascending=False), width="stretch", hide_index=True,
-                 column_config={"source_url": st.column_config.LinkColumn("Source URL")})
+    safe_dataframe(combined[columns].sort_values("quality_score", ascending=False), width="stretch", hide_index=True,
+                   column_config={"source_url": st.column_config.LinkColumn("Source URL")})
     quality_figure = style_figure(px.bar(combined.nlargest(20, "quality_score").sort_values("quality_score"),
                            x="quality_score", y="instrument", orientation="h", title="Quality score ranking",
                            color_discrete_sequence=["#176B87"]), showlegend=False)
@@ -564,7 +594,7 @@ def rebalance_engine():
             row.get("Score"), row.get("Data confidence"), isin=row.get("ISIN"), quantity=row.get("Quantity"),
             estimated_value=f"€{float(row.get('Est. value') or 0):,.2f}", fee_issue=row.get("Fee issue"))
     with st.expander("Open complete recommendation table"):
-        st.dataframe(recommendations, width="stretch", hide_index=True)
+        safe_dataframe(recommendations, width="stretch", hide_index=True)
 
 
 def savings_plan_page():
@@ -618,7 +648,7 @@ def recommendation_report_page():
     render_section_card("Recommendation report", "A source-aware record of portfolio and savings-plan decisions.")
     report = st.session_state.recommendation_report
     st.caption("Every recommendation includes source, timestamp, confidence, reason, and an execution-price warning.")
-    st.dataframe(report, width="stretch", hide_index=True)
+    safe_dataframe(report, width="stretch", hide_index=True)
     a, b = st.columns(2)
     a.download_button("Export recommendation report CSV", report.to_csv(index=False), "recommendation_report.csv", "text/csv")
     if b.button("Save report to Supabase history"):
@@ -871,7 +901,7 @@ def screenshot_workflow():
             else:
                 holding = create_holding_from_screenshot_data(draft)
                 if image:
-                    holding["screenshot_path"] = ScreenshotStorage(gateway, user_id).upload(
+                    holding["screenshot_path"] = ScreenshotStorage(database.gateway, database.user_id).upload(
                         image.name, image.getvalue(), image.type or "application/octet-stream")
                 rows = update_holding_by_isin(st.session_state.holdings.to_dict("records"), holding)
                 st.session_state.holdings = holdings_to_dataframe(rows)
@@ -926,7 +956,7 @@ def portfolio_section():
     with st.expander("Open valuation snapshot history", expanded=False):
         render_section_card("Valuation snapshots", "A durable Supabase history used for daily, weekly, monthly, and yearly comparisons.")
         if history.empty: render_empty_state("No snapshots yet", "Save today’s valuation from Analytics to begin your performance history.")
-        else: st.dataframe(history, width="stretch", hide_index=True)
+        else: safe_dataframe(history, width="stretch", hide_index=True)
         st.download_button("Export valuation snapshots CSV", history.to_csv(index=False),
                            "valuation_history.csv", "text/csv")
 
@@ -1015,7 +1045,7 @@ def market_data_news_section():
             render_metric_card(row.get("Provider"), row.get("Status", "Unknown"), row.get("Purpose"),
                                "positive" if enabled else "neutral")
     with st.expander("Provider details and errors", expanded=False):
-        st.dataframe(pd.DataFrame(providers), width="stretch", hide_index=True)
+        safe_dataframe(pd.DataFrame(providers), width="stretch", hide_index=True)
 
     render_section_card("2. Data Coverage", "Coverage is calculated from cached holdings and candidates; it does not trigger network requests.")
     render_metric_card("Total assets", int(coverage.get("total_assets", 0)), "Holdings and candidates")
@@ -1039,7 +1069,7 @@ def market_data_news_section():
                          gap.get("Suggested next action"), "Low")
     with st.expander("Open precise Data Gap Report", expanded=False):
         if gap_report.empty: render_empty_state("No detected gaps", "Cached data currently satisfies the configured coverage checks.")
-        else: st.dataframe(gap_report, width="stretch", hide_index=True)
+        else: safe_dataframe(gap_report, width="stretch", hide_index=True)
 
     render_section_card("3. Missing Data Repair", "Suggestions remain separate from entered facts until you explicitly accept or confirm them.")
     repair_labels = [("Price symbol", "symbol"), ("TER/cost", "TER/cost"),
@@ -1070,7 +1100,7 @@ def market_data_news_section():
                                 "Suggested value": first.get("value", ""),
                                 "Confidence": first.get("confidence", asset.get("web_scrape_confidence", "")),
                                 "Action": "Review suggestion" if suggestions else "Auto repair"})
-        st.dataframe(pd.DataFrame(repair_rows), width="stretch", hide_index=True)
+        safe_dataframe(pd.DataFrame(repair_rows), width="stretch", hide_index=True)
         selected_row = st.selectbox("Choose an asset to repair", list(missing.index), key="market_repair_asset",
                                     format_func=lambda index: f"{missing.loc[index, 'Instrument']} · {missing.loc[index, 'ISIN'] or 'No ISIN'}")
         selected_summary = missing.loc[selected_row]
@@ -1146,7 +1176,7 @@ def market_data_news_section():
     for warning in st.session_state.enrichment_warnings: render_alert(warning, "warning")
     with st.expander("Open enrichment audit", expanded=False):
         if audit.empty: render_empty_state("No enrichment audit yet", "Run enrichment to create the provider-by-provider evidence trail.")
-        else: st.dataframe(audit, width="stretch", hide_index=True)
+        else: safe_dataframe(audit, width="stretch", hide_index=True)
         st.download_button("Export enrichment audit CSV", audit.to_csv(index=False), "enrichment_audit.csv", "text/csv")
 
     render_section_card("5. News & Sentiment", "GDELT, public RSS, and available yfinance headlines ranked against your portfolio and themes.")
@@ -1161,8 +1191,8 @@ def market_data_news_section():
             render_news_card(item.get("title"), item.get("source"), item.get("published_at"), item.get("sentiment"), item.get("url"))
         with st.expander("News table", expanded=False):
             columns = [column for column in ["title", "source", "published_at", "category", "sentiment", "confidence", "url"] if column in filtered]
-            st.dataframe(filtered[columns], width="stretch", hide_index=True,
-                         column_config={"url": st.column_config.LinkColumn("Link")})
+            safe_dataframe(filtered[columns], width="stretch", hide_index=True,
+                           column_config={"url": st.column_config.LinkColumn("Link")})
 
     render_section_card("Sentiment summary", "A transparent, recency-weighted blend of public-news language and observed market momentum.")
     sentiment_cols = st.columns(3)
@@ -1181,11 +1211,11 @@ def market_data_news_section():
     with audit_tabs[2]: render_metric_card("Retry queue", len(RetryQueue().due(failure_frame.to_dict("records") if not failure_frame.empty else [])))
     with st.expander("Provider failures and retry cooldowns", expanded=False):
         if failure_frame.empty: render_empty_state("No stored provider failures", "Failures will appear here without stopping the remaining waterfall.")
-        else: st.dataframe(failure_frame, width="stretch", hide_index=True)
+        else: safe_dataframe(failure_frame, width="stretch", hide_index=True)
     with st.expander("Field-level source audit", expanded=False):
         source_audit = st.session_state.get("source_audit", pd.DataFrame())
         if source_audit.empty: render_empty_state("No field audit yet", "Deep scans record provider, URL, confidence, extraction method, and conflicts here.")
-        else: st.dataframe(source_audit, width="stretch", hide_index=True)
+        else: safe_dataframe(source_audit, width="stretch", hide_index=True)
 
     render_section_card("Candidate Asset Research", "Edit the candidate universe first; open rankings and detailed quality only when needed.")
     with st.expander("Candidate universe editor", expanded=False): candidate_universe()
@@ -1240,7 +1270,7 @@ def strategy_section():
     history = database.load_strategy_snapshots()
     render_section_card("Strategy history", "Saved evidence snapshots create an audit trail without changing broker positions.")
     if history.empty: render_empty_state("No strategy snapshots", "Save the current strategy when you want a durable checkpoint.")
-    else: st.dataframe(history, width="stretch", hide_index=True)
+    else: safe_dataframe(history, width="stretch", hide_index=True)
 
 
 def _save_current_valuation_snapshot():
@@ -1337,16 +1367,16 @@ def rebalance_section():
     render_section_card("Execution order", "Sells first, then cash-limited buys; lower-priority actions are deferred when funding is insufficient.")
     execution = recommendation_execution_order(st.session_state.recommendations)
     if execution.empty: render_empty_state("No execution steps", "Run the full rebalance to create an ordered checklist.")
-    else: st.dataframe(execution[[column for column in ["Step", "Action", "Instrument", "Quantity", "Est. value", "Fee issue"] if column in execution]],
-                       width="stretch", hide_index=True)
+    else: safe_dataframe(execution[[column for column in ["Step", "Action", "Instrument", "Quantity", "Est. value", "Fee issue"] if column in execution]],
+                         width="stretch", hide_index=True)
     savings_plan_page()
     render_section_card("Manual Scalable checklist", "These rows must be reviewed and applied manually in Scalable Capital.")
     manual_checklist = create_savings_plan_execution_checklist(st.session_state.plans, st.session_state.optimized_savings)
     if manual_checklist.empty: render_empty_state("No savings-plan changes", "The current optimizer output does not require a manual plan update.")
-    else: st.dataframe(manual_checklist, width="stretch", hide_index=True)
+    else: safe_dataframe(manual_checklist, width="stretch", hide_index=True)
     render_section_card("Allocation before and after", "Current exposure against the target policy after considering the recommendation set.")
     allocation_summary = allocation_table(st.session_state.drift)
-    st.dataframe(allocation_summary, width="stretch", hide_index=True)
+    safe_dataframe(allocation_summary, width="stretch", hide_index=True)
     with st.expander("Recommendation report and source detail", expanded=False): recommendation_report_page()
 
 
@@ -1387,13 +1417,13 @@ def settings_page():
     required = ["SUPABASE_URL", "SUPABASE_ANON_KEY", "APP_PASSWORD"]
     optional = ["OPENFIGI_API_KEY", "COINGECKO_API_KEY", "FMP_API_KEY", "TWELVE_DATA_API_KEY"]
     with st.expander("Secrets status"):
-        st.dataframe(pd.DataFrame(
+        safe_dataframe(pd.DataFrame(
             [{"Secret": name, "Required": "Yes", "Status": secret_status(name)} for name in required] +
             [{"Secret": name, "Required": "No", "Status": secret_status(name)} for name in optional]),
             width="stretch", hide_index=True)
     render_section_card("Data providers", "Free sources lead the waterfall; paid-key adapters remain optional.")
     provider_rows = get_provider_registry()
-    st.dataframe(pd.DataFrame(provider_rows), width="stretch", hide_index=True)
+    safe_dataframe(pd.DataFrame(provider_rows), width="stretch", hide_index=True)
     render_section_card("Strategy settings", "Long-term allocation and risk guardrails used by the optimizer.")
     a, b, c = st.columns(3)
     s["base_currency"] = a.selectbox("Base currency", ["EUR"])

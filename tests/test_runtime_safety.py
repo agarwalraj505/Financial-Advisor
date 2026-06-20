@@ -77,3 +77,38 @@ def test_no_invalid_or_unwrapped_streamlit_toasts_remain():
                     if keyword.value.value not in valid:
                         problems.append(f"invalid icon {keyword.value.value!r} in {path}")
     assert problems == []
+
+
+def test_app_callbacks_do_not_reference_an_undefined_user_id():
+    """App-level callbacks must derive identity from the initialized Database."""
+    path = Path(__file__).parents[1] / "app.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    callbacks = {
+        node.name: node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in {"refresh_live_data", "screenshot_workflow"}
+    }
+    assert callbacks.keys() == {"refresh_live_data", "screenshot_workflow"}
+    for name, callback in callbacks.items():
+        free_user_references = [
+            node for node in ast.walk(callback)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id == "user_id"
+        ]
+        assert free_user_references == [], name
+        assert any(
+            isinstance(node, ast.Attribute)
+            and node.attr == "user_id"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "database"
+            for node in ast.walk(callback)
+        ), name
+
+
+def test_display_safe_frame_serializes_mixed_conflicts():
+    import app
+    import pandas as pd
+
+    source = pd.DataFrame({"conflict": [{"entered": "ETF"}, "ETF", 1.0]})
+    safe = app._display_safe_frame(source)
+    assert safe["conflict"].map(type).eq(str).all()
+    assert '"entered": "ETF"' in safe.loc[0, "conflict"]
