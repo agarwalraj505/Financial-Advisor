@@ -42,7 +42,8 @@ def _payload(row: dict | pd.Series, mapping: dict[str, str], user_id: str) -> di
 
 
 HOLDING_MAP = {"instrument": "instrument", "isin": "isin", "ticker_id": "ticker_id",
-    "price_symbol": "price_symbol", "asset_type": "asset_type", "category": "category", "theme": "theme",
+    "price_symbol": "price_symbol", "resolved_price_symbol": "resolved_price_symbol",
+    "asset_type": "asset_type", "category": "category", "theme": "theme",
     "region": "region", "currency": "currency", "quantity": "quantity",
     "manual_current_price": "manual_current_price", "live_current_price": "live_current_price",
     "price_source": "price_source", "fx_rate_to_eur": "fx_rate_to_eur",
@@ -56,10 +57,12 @@ HOLDING_MAP = {"instrument": "instrument", "isin": "isin", "ticker_id": "ticker_
 HOLDING_MAP.update({"ter_pct": "ter_percent", "fund_size_eur": "fund_size_eur",
     "replication_method": "replication_method", "distribution_policy": "distribution_policy",
     "domicile": "domicile", "manual_spread_estimate_pct": "manual_spread_estimate_percent",
-    "last_updated": "last_updated"})
+    "last_updated": "last_updated", "data_source": "data_source", "source_url": "source_url",
+    "data_confidence": "data_confidence", "exchange": "exchange"})
 
 CANDIDATE_MAP = {"instrument": "instrument", "isin": "isin", "ticker_id": "ticker_id",
-    "price_symbol": "price_symbol", "asset_type": "asset_type", "category": "category", "theme": "theme",
+    "wkn": "wkn", "price_symbol": "price_symbol", "resolved_price_symbol": "resolved_price_symbol", "exchange": "exchange",
+    "asset_type": "asset_type", "category": "category", "theme": "theme",
     "region": "region", "currency": "currency", "ter_pct": "ter_percent", "fund_size_eur": "fund_size_eur",
     "replication_method": "replication_method", "distribution_policy": "distribution_policy",
     "domicile": "domicile", "savings_plan_available": "savings_plan_available",
@@ -70,7 +73,7 @@ CANDIDATE_MAP = {"instrument": "instrument", "isin": "isin", "ticker_id": "ticke
     "cost_score": "cost_score", "portfolio_fit_score": "portfolio_fit_score",
     "risk_control_score": "risk_control_score", "total_score": "total_score", "data_source": "data_source",
     "source_url": "source_url", "data_confidence": "data_confidence", "last_updated": "last_updated",
-    "notes": "notes"}
+    "notes": "notes", "last_updated_date": "last_updated_date"}
 
 ENRICHMENT_MAP = {"valuation_ready": "valuation_ready", "recommendation_ready": "recommendation_ready",
     "valuation_review_reasons": "valuation_review_reasons", "recommendation_review_reasons": "recommendation_review_reasons",

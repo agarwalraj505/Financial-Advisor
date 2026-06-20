@@ -51,10 +51,17 @@ The app enriches every holding and candidate through a free-data waterfall:
 
 User-entered values are never silently overwritten. Conflicts are stored as suggestions with source, timestamp, method, and confidence.
 
+### Price and valuation precedence
+
+Every position exposes one explicit source: **Live market data**, a user-confirmed **Scalable screenshot**, **Manual fallback**, or **Missing**. Resolved market symbols are stored separately from entered symbols, so enrichment does not silently rewrite the portfolio record.
+
+EUR values use ECB FX first and yfinance FX second. GBp/GBX quotes are treated as pence—one hundredth of GBP—which avoids the common 100× valuation error.
+
 ### Free-source waterfall
 
 - Identifiers: entered values → unauthenticated OpenFIGI mapping/name search → bounded Yahoo candidates → public search → permitted issuer/aggregator pages → manual repair.
 - Prices: entered fallback → exact yfinance symbol → cached symbol candidates → conservative Stooq fallback → crypto yfinance/CoinGecko → manual fallback.
+- Public price fallback: permitted issuer/exchange/product pages are checked after yfinance and Stooq. Low-confidence snippets are never used for valuation.
 - FX: ECB Data Portal → yfinance pair → confirmed manual FX.
 - Fund facts: entered facts → yfinance metadata → issuer factsheet/KID HTML or PDF → permitted ETF aggregator → manual confirmation.
 - News: public GDELT DOC API → configured RSS → yfinance asset news → relevance ranking and transparent sentiment.
@@ -109,6 +116,8 @@ Free sources often do not provide dependable ETF TER data. A candidate ETF/ETC/E
 ## 3. Internet enrichment and scraping
 
 The app ranks official issuer/factsheet pages first, then official exchanges, accessible ETF aggregators, and finance portals. It respects `robots.txt` where possible and does not bypass paywalls, logins, captchas, or anti-bot controls. It never scrapes Scalable Capital.
+
+Accessible factsheet and KID PDFs are capped at 40 pages and 12 MB and parsed with `pypdf`. High confidence requires a reliable source, the expected ISIN, and a clearly labelled value. Search snippets remain low confidence and cannot make a candidate buy-ready.
 
 > Web-scraped data may be incomplete or outdated. Confirm important data from the issuer factsheet before investing.
 

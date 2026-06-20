@@ -196,6 +196,32 @@ def data_quality_badge(status):
     return render_data_quality_badge(status)
 
 
+def source_badge(source, confidence=""):
+    label = str(source or "Unknown source")
+    if confidence: label += f" · {confidence}"
+    tone = "success" if str(confidence).lower() == "high" else "warning" if str(confidence).lower() == "medium" else "neutral"
+    return render_status_pill(label, tone)
+
+
+def command_button(label, key=None, *, primary=True, disabled=False, help=None, use_container_width=True):
+    """Consistent command-center action button."""
+    return st.button(label, key=key, type="primary" if primary else "secondary", disabled=disabled,
+                     help=help, use_container_width=use_container_width)
+
+
+def gap_card(asset, field, error="", next_action="", confidence="Low"):
+    return _render(f'<div class="gap-card"><div class="gap-card-head">'
+                   f'<span class="recommendation-instrument">{escape(str(asset or "Unknown asset"))}</span>'
+                   f'{render_status_pill(confidence, "warning", render=False)}</div>'
+                   f'<div class="gap-field">Missing: {escape(str(field or "Unknown field"))}</div>'
+                   f'<div class="recommendation-reason">{escape(str(error or "No verified value available"))}</div>'
+                   f'<div class="hero-caption">Next: {escape(str(next_action or "Review source attempts"))}</div></div>')
+
+
+def strategy_card(strategy):
+    return render_strategy_summary_card(strategy)
+
+
 def news_card(title, source, published_at, sentiment, url):
     return render_news_card(title, source, published_at, sentiment, url)
 

@@ -6,7 +6,13 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
+from data_cache import is_stale
 from market_data import MarketQuote, normalise_currency
+
+PRICE_SOURCE_LIVE = "Live market data"
+PRICE_SOURCE_SCREENSHOT = "Scalable screenshot"
+PRICE_SOURCE_MANUAL = "Manual fallback"
+PRICE_SOURCE_MISSING = "Missing"
 
 
 def calculate_position_value(quantity: float, price: float, fx_rate_to_eur: float = 1.0) -> float:
@@ -22,6 +28,51 @@ def calculate_pl(current_value: float, buy_in_value: float) -> dict[str, float]:
     profit = float(current_value) - float(buy_in_value)
     percent = profit / float(buy_in_value) * 100 if buy_in_value else 0.0
     return {"pl_eur": round(profit, 2), "pl_percent": round(percent, 2)}
+
+
+def _number(value, default=0.0) -> float:
+    try:
+        return default if pd.isna(value) else float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def select_position_price(row: dict, quote: MarketQuote | None = None) -> tuple[float, str, bool]:
+    """Choose one explainable price without mutating entered screenshot values."""
+    if quote and quote.is_available:
+        return float(quote.latest_price), PRICE_SOURCE_LIVE, bool(quote.stale)
+    cached_live = _number(row.get("live_current_price"))
+    if cached_live > 0:
+        return cached_live, PRICE_SOURCE_LIVE, is_stale(row.get("last_updated"), "price")
+    screenshot = _number(row.get("current_price_eur"))
+    screenshot_evidence = any((row.get("screenshot_path"), row.get("screenshot_captured_at"),
+                               str(row.get("source", "")).lower().startswith("scalable"),
+                               bool(row.get("user_confirmed", False))))
+    if screenshot > 0 and screenshot_evidence:
+        return screenshot, PRICE_SOURCE_SCREENSHOT, False
+    manual = _number(row.get("manual_current_price"))
+    if manual > 0:
+        return manual, PRICE_SOURCE_MANUAL, False
+    return 0.0, PRICE_SOURCE_MISSING, False
+
+
+def resolve_position_fx(currency: str, row: dict, fx_rates: dict[str, float]) -> tuple[float, str]:
+    """Return EUR per quote unit; GBX/GBp is converted from pence, not pounds."""
+    normalized = normalise_currency(currency)
+    if normalized == "EUR":
+        return 1.0, "EUR"
+    direct = _number(fx_rates.get(normalized))
+    if direct > 0:
+        return direct, "ECB/yfinance FX"
+    if normalized == "GBX":
+        gbp = _number(fx_rates.get("GBP"))
+        if gbp > 0:
+            return gbp / 100.0, "ECB/yfinance FX (GBP pence conversion)"
+    row_currency = normalise_currency(row.get("currency", ""))
+    stored = _number(row.get("fx_rate_to_eur"))
+    if stored > 0 and row_currency == normalized:
+        return stored, "Cached/manual FX"
+    return 0.0, "Missing FX"
 
 
 def calculate_category_allocation(holdings: pd.DataFrame) -> pd.DataFrame:
@@ -66,36 +117,34 @@ def valuate_holdings(
     rows = []
     for _, holding in frame.iterrows():
         row = holding.to_dict()
-        symbol = str(row.get("price_symbol", "") or "").strip()
-        manual = float(row.get("manual_current_price", 0) or 0)
-        quantity = float(row.get("quantity", 0) or 0)
+        symbol = str(row.get("resolved_price_symbol") or row.get("price_symbol") or "").strip()
+        quantity = _number(row.get("quantity"))
         quote = quotes.get(symbol)
-        stored_live = float(row.get("live_current_price", 0) or 0)
-        live = float(quote.latest_price) if quote and quote.is_available else stored_live
         currency = normalise_currency(quote.currency if quote and quote.currency else row.get("currency", "") or "EUR")
-        fx_rate = float(fx_rates.get(currency, row.get("fx_rate_to_eur", 1) or 1))
-        if quote and quote.is_available:
-            price, source = live, "Live"
-        elif stored_live > 0:
-            price, source = stored_live, "Cached live"
-        elif manual > 0:
-            price, source = manual, "Manual fallback"
-            # Manual prices are entered in the row's stated currency.
-        else:
-            price, source = 0.0, "Missing"
-        value = calculate_position_value(quantity, price, fx_rate)
-        buy_in = float(row.get("buy_in_value_eur", 0) or 0)
-        profit = value - buy_in
+        price, source, stale = select_position_price(row, quote)
+        if source == PRICE_SOURCE_SCREENSHOT:
+            currency = "EUR"  # current_price_eur is explicitly denominated in euros.
+        fx_rate, fx_source = resolve_position_fx(currency, row, fx_rates)
+        value = calculate_position_value(quantity, price, fx_rate) if price > 0 and fx_rate > 0 else 0.0
+        buy_in = _number(row.get("buy_in_value_eur"))
+        pl = calculate_pl(value, buy_in)
         previous = (float(quote.previous_close) if quote and quote.previous_close
-                    else float(row.get("previous_close", 0) or 0))
+                    else _number(row.get("previous_close")))
         daily_gain = calculate_position_value(quantity, price - previous, fx_rate) if previous else 0.0
-        row.update({"live_current_price": live, "price_source": source, "currency": currency,
+        live = float(quote.latest_price) if quote and quote.is_available else _number(row.get("live_current_price"))
+        errors = []
+        if price <= 0: errors.append("Price missing after live, screenshot, and manual fallbacks")
+        if fx_rate <= 0: errors.append(f"FX rate to EUR missing for {currency}")
+        if quote and quote.error and not quote.is_available: errors.append(quote.error)
+        row.update({"live_current_price": live, "selected_price": price, "price_source": source,
+                    "price_stale": stale, "currency": currency,
                     "fx_rate_to_eur": fx_rate, "current_value_eur": value,
-                    "pl_eur": round(profit, 2), "pl_pct": round(profit / buy_in * 100, 2) if buy_in else 0.0,
+                    "fx_source": fx_source, "pl_eur": pl["pl_eur"],
+                    "pl_pct": pl["pl_percent"], "pl_percent": pl["pl_percent"],
                     "previous_close": previous, "daily_gain_eur": daily_gain,
                     "daily_gain_pct": round((price / previous - 1) * 100, 2) if previous else 0.0,
-                    "price_error": (quote.error if quote else "" if stored_live > 0
-                                    else "Missing price symbol" if not symbol else "Live price unavailable")})
+                    "daily_gain_percent": round((price / previous - 1) * 100, 2) if previous else 0.0,
+                    "price_error": "; ".join(dict.fromkeys(errors))})
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -108,7 +157,7 @@ def portfolio_market_history(holdings: pd.DataFrame, quotes: dict[str, MarketQuo
         if str(row.get("category", "")) == "Cash":
             static_value += float(row.get("current_value_eur", 0) or 0)
             continue
-        symbol = str(row.get("price_symbol", "") or "")
+        symbol = str(row.get("resolved_price_symbol") or row.get("price_symbol") or "")
         quote = quotes.get(symbol)
         history = quote.histories.get("1y") if quote else None
         if history is None or history.empty or "Close" not in history:

@@ -39,10 +39,13 @@ def calculate_data_coverage(holdings: pd.DataFrame, candidates: pd.DataFrame,
     combined = pd.concat([holdings.assign(_candidate=False), candidates.assign(_candidate=True)], ignore_index=True, sort=False)
     total = len(combined)
     if total == 0:
-        return {key: 0.0 for key in ("price_coverage", "metadata_coverage", "ter_coverage", "fx_coverage",
+        return {key: 0.0 for key in ("price_coverage", "symbol_coverage", "metadata_coverage", "ter_coverage", "fx_coverage",
                                       "factsheet_coverage", "news_coverage", "recommendation_ready", "valuation_ready")} | {"total_assets": 0}
     def pct(mask): return round(float(pd.Series(mask).fillna(False).mean() * 100), 1)
-    prices = combined.apply(lambda a: any(_number(a.get(field)) > 0 for field in ("live_current_price", "manual_current_price", "latest_price")), axis=1)
+    prices = combined.apply(lambda a: any(_number(a.get(field)) > 0 for field in
+                            ("live_current_price", "current_price_eur", "manual_current_price", "latest_price")), axis=1)
+    symbols = combined.apply(lambda a: str(a.get("asset_type", "")).lower() == "cash" or
+                             _present(a.get("resolved_price_symbol") or a.get("price_symbol")), axis=1)
     metadata = combined.apply(lambda a: _present(a.get("category")) and _present(a.get("asset_type")), axis=1)
     asset_types = combined.get("asset_type", pd.Series("", index=combined.index))
     funds = combined[asset_types.isin(["ETF", "ETC", "ETP"])]
@@ -51,7 +54,8 @@ def calculate_data_coverage(holdings: pd.DataFrame, candidates: pd.DataFrame,
     factsheet_funds = funds.get("factsheet_url", pd.Series(False, index=funds.index)).apply(_present)
     factsheet = 100.0 if funds.empty else pct(factsheet_funds)
     news_count = len(news_items) if news_items is not None else 0
-    return {"total_assets": total, "price_coverage": pct(prices), "metadata_coverage": pct(metadata),
+    return {"total_assets": total, "price_coverage": pct(prices), "symbol_coverage": pct(symbols),
+            "metadata_coverage": pct(metadata),
             "ter_coverage": ter, "fx_coverage": pct(fx), "factsheet_coverage": factsheet,
             "news_coverage": 100.0 if news_count else 0.0,
             "recommendation_ready": pct(combined.get("recommendation_ready", pd.Series(False, index=combined.index))),
@@ -70,8 +74,16 @@ def asset_is_fresh_and_complete(asset: dict, is_candidate: bool, now=None) -> bo
 
 def repair_missing_symbols(assets: list[dict], resolver, max_workers: int = 4,
                            progress_callback=None) -> list[dict]:
-    """Resolve only missing symbols, in parallel, without starting metadata scans."""
-    missing = [asset for asset in assets if not str(asset.get("price_symbol", "") or "").strip()]
+    """Resolve missing symbols and entered symbols already proven bad."""
+    missing = []
+    for asset in assets:
+        current = str(asset.get("resolved_price_symbol") or asset.get("price_symbol") or "").strip()
+        cached = resolver.load_cached_symbol_resolution(str(asset.get("id") or asset.get("isin") or
+                                                            asset.get("wkn") or asset.get("instrument") or "")) or {}
+        bad = cached.get("bad_symbols") or {}
+        recently_bad = current in bad and resolver._bad_is_fresh(bad[current])
+        if not current or recently_bad:
+            missing.append(asset)
     results = []
     with ThreadPoolExecutor(max_workers=min(4, max(1, max_workers))) as executor:
         futures = {executor.submit(resolver.resolve_price_symbol, asset): asset for asset in missing}

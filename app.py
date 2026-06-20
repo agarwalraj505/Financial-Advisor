@@ -10,10 +10,13 @@ import streamlit as st
 
 from auth import logout_button, require_authentication
 from asset_quality import assess_asset_readiness
+from chart_components import (create_allocation_chart, create_current_vs_target_chart,
+                              create_portfolio_value_chart, create_savings_plan_before_after_chart,
+                              create_winners_losers_chart, style_figure)
 from db import Database
 from coverage_engine import (DeepScanEngine, calculate_data_coverage,
                              repair_missing_symbols as repair_symbol_batch)
-from data_cache import SupabaseDataCache
+from data_cache import SupabaseDataCache, is_stale, parse_timestamp, utc_now
 from data_gap_report import generate_data_gap_report
 from market_data import MarketQuote, get_fx_rate_to_eur, get_market_quote
 from market_data_engine import MarketDataEngine
@@ -35,23 +38,23 @@ from savings_plan_manager import (create_savings_plan_execution_checklist,
                                   normalize_savings_plan_rows, validate_savings_plan_budget)
 from screenshot_parser import (create_holding_from_screenshot_data, parse_scalable_text,
                                update_holding_by_isin, validate_screenshot_holding)
+from source_audit import suggestion_audit_rows
 from scoring import score_assets
 from sentiment_engine import classify_sentiment, create_market_sentiment_summary
 from storage import ScreenshotStorage
-from symbol_resolver import (SymbolResolver, fresh_bad_symbols,
+from symbol_resolver import (SymbolResolver, fresh_bad_symbols, is_probably_invalid_symbol_error,
                              store_symbol_resolution as cache_symbol_resolution)
 from styles import inject_premium_css
 from strategy_engine import (create_strategy_explanation, get_current_strategy,
                              refresh_market_strategy)
 from supabase_client import SupabaseConnectionError, SupabaseGateway, get_supabase_client
-from ui_components import (create_allocation_chart, create_current_vs_target_chart,
-                           create_portfolio_value_chart, create_savings_plan_before_after_chart,
-                           create_winners_losers_chart, render_alert, render_data_quality_badge,
+from ui_components import (render_alert, render_data_quality_badge,
                            render_empty_state, render_flow_steps, render_hero_summary,
                            render_metric_card, render_news_card, render_page_header,
                            render_rebalance_summary, render_recommendation_card,
                            render_section_card, render_status_pill, render_strategy_summary_card,
-                           render_flash_message, safe_toast, set_flash_success, style_figure)
+                           render_flash_message, safe_toast, set_flash_success,
+                           gap_card, source_badge)
 from valuation import calculate_historical_gains, portfolio_market_history, valuate_holdings
 
 st.set_page_config(page_title="Financial Hub", page_icon="◆", layout="wide",
@@ -60,6 +63,7 @@ inject_premium_css()
 
 HOLDING_DISPLAY = {"instrument": "Instrument", "isin": "ISIN", "ticker_id": "Ticker/ID",
     "price_symbol": "Price Symbol", "asset_type": "Asset type", "category": "Category", "quantity": "Quantity",
+    "resolved_price_symbol": "Resolved market symbol",
     "theme": "Theme", "region": "Region",
     "manual_current_price": "Manual current price", "live_current_price": "Live current price",
     "price_source": "Price source", "currency": "Currency", "fx_rate_to_eur": "FX rate to EUR",
@@ -154,10 +158,12 @@ def initialise_state(database: Database):
             if row.get("data_kind") == "price" and key.startswith("price:"):
                 symbol = key.removeprefix("price:")
                 if symbol not in cached_quotes:
+                    expires_at = parse_timestamp(row.get("expires_at"))
                     cached_quotes[symbol] = MarketQuote(
                         symbol=symbol, latest_price=payload.get("latest_price"),
                         previous_close=payload.get("previous_close"), currency=payload.get("currency", ""),
-                        fetched_at=fetched_at, histories={})
+                        fetched_at=fetched_at, histories={},
+                        stale=bool(expires_at <= utc_now()) if expires_at else is_stale(fetched_at, "price"))
                     if fetched_at: cached_fetches.append(str(fetched_at))
             elif row.get("data_kind") == "fx" and key.startswith("fx:"):
                 currency = key.removeprefix("fx:")
@@ -227,7 +233,7 @@ def recompute_models():
     score_settings["current_category_counts"] = details[details["category"] != "Cash"].groupby("category").size().to_dict()
     scored_candidates = score_assets(st.session_state.candidates, research, drift, score_settings, False)
     for index, asset in scored_candidates.iterrows():
-        quote = st.session_state.quotes.get(str(asset.get("price_symbol", "")))
+        quote = st.session_state.quotes.get(str(asset.get("resolved_price_symbol") or asset.get("price_symbol", "")))
         currency = quote.currency if quote and quote.currency else str(asset.get("currency", "EUR"))
         fx = float(st.session_state.fx_rates.get(currency, 1.0))
         scored_candidates.loc[index, "fx_rate_to_eur"] = fx
@@ -239,6 +245,8 @@ def recompute_models():
     optimizer_settings["portfolio_total_eur"] = calculate_total_value(details)
     optimizer_settings["current_crypto_value_eur"] = float(details.loc[details["category"] == "Crypto", "current_value_eur"].sum())
     optimizer_settings["news_sentiment"] = st.session_state.get("sentiment", {}).get("sentiment", "Neutral")
+    optimizer_settings["etf_candidate_ter_coverage"] = calculate_data_coverage(
+        pd.DataFrame(), scored_candidates).get("ter_coverage", 0.0)
     recommendations = generate_market_aware_recommendations(scored_current, scored_candidates, drift, optimizer_settings)
     all_scored = pd.concat([scored_current, scored_candidates], ignore_index=True, sort=False)
     savings = optimize_savings_plans(st.session_state.plans, all_scored, drift,
@@ -260,10 +268,18 @@ def refresh_live_data(force=False):
         cached_fx.clear()
     interval = max(30, int(st.session_state.settings["refresh_interval"]))
     bucket = int(time.time() // interval)
-    symbols = set(st.session_state.holdings["price_symbol"].astype(str)) | set(st.session_state.candidates["price_symbol"].astype(str))
+    symbols = set()
+    for frame in (st.session_state.holdings, st.session_state.candidates):
+        for _, asset in frame.iterrows():
+            symbol = str(asset.get("resolved_price_symbol") or asset.get("price_symbol") or "").strip()
+            if symbol: symbols.add(symbol)
     cooling_down = fresh_bad_symbols(st.session_state.get("symbol_resolution_cache", []))
+    quick_retry = RetryQueue()
+    quick_retry.memory = list(st.session_state.get("provider_failures", []))
+    initial_quick_failures = len(quick_retry.memory)
     symbols = sorted(symbol for symbol in symbols
-                     if symbol and symbol.lower() != "nan" and symbol not in cooling_down)
+                     if symbol and symbol.lower() != "nan" and symbol not in cooling_down
+                     and quick_retry.can_retry("Quick price", symbol))
     with ThreadPoolExecutor(max_workers=4) as executor:
         quotes = dict(zip(symbols, executor.map(lambda symbol: cached_quote(symbol, bucket), symbols)))
     currencies = {quote.currency for quote in quotes.values() if quote.currency}
@@ -290,6 +306,35 @@ def refresh_live_data(force=False):
     except (AttributeError, SupabaseConnectionError):
         pass  # Cache schema may not be installed yet; valuation remains usable in session.
     failed = [symbol for symbol, quote in quotes.items() if not quote.is_available]
+    for symbol in failed:
+        quote = quotes[symbol]
+        quick_retry.record_failure("Quick price", {"instrument": symbol}, symbol,
+                                   "Provider timeout" if "timeout" in str(quote.error).lower() else "Price unavailable",
+                                   quote.error or "No verified live price")
+    for failure in quick_retry.memory[initial_quick_failures:]:
+        try: database.save_provider_failure(failure)
+        except (AttributeError, SupabaseConnectionError): pass
+    if len(quick_retry.memory) > initial_quick_failures:
+        st.session_state.provider_failures = quick_retry.memory
+    if failed:
+        resolver = SymbolResolver()
+        new_cache = list(st.session_state.get("symbol_resolution_cache", []))
+        for frame in (st.session_state.holdings, st.session_state.candidates):
+            for _, asset in frame.iterrows():
+                symbol = str(asset.get("resolved_price_symbol") or asset.get("price_symbol") or "").strip()
+                quote = quotes.get(symbol)
+                if symbol in failed and quote and is_probably_invalid_symbol_error(quote.error):
+                    record = asset.to_dict(); resolver.mark_bad_symbol(record, symbol, quote.error)
+                    key = str(record.get("id") or record.get("isin") or record.get("wkn") or record.get("instrument") or "")
+                    resolution = resolver.load_cached_symbol_resolution(key)
+                    if resolution:
+                        payload = {**resolution, "asset_key": key, "isin": record.get("isin", ""),
+                                   "instrument": record.get("instrument", "")}
+                        try: database.save_symbol_resolution(payload)
+                        except (AttributeError, SupabaseConnectionError): pass
+                        new_cache = [item for item in new_cache if item.get("asset_key") != key]
+                        new_cache.insert(0, payload)
+        st.session_state.symbol_resolution_cache = new_cache
     if cooling_down:
         st.caption(f"Skipped {len(cooling_down)} symbol candidate(s) still inside the seven-day failure cooldown.")
     if failed:
@@ -393,14 +438,19 @@ def current_portfolio():
     refresh_controls("portfolio_refresh")
     existing = st.session_state.holdings.copy()
     show_advanced = st.toggle("Show advanced holding columns", value=False, key="portfolio_advanced_columns")
-    compact_columns = ["instrument", "isin", "price_symbol", "asset_type", "category", "quantity",
+    compact_columns = ["instrument", "isin", "price_symbol", "resolved_price_symbol", "asset_type", "category", "quantity",
                        "manual_current_price", "live_current_price", "price_source", "current_value_eur",
                        "buy_in_value_eur", "pl_eur", "pl_pct"]
     selected_columns = [column for column in (HOLDING_DISPLAY if show_advanced else compact_columns) if column in existing]
     display = existing[selected_columns].rename(columns=HOLDING_DISPLAY)
     source = existing.get("price_source", pd.Series("Missing", index=existing.index)).fillna("Missing").astype(str)
-    display["Data quality"] = source.apply(
-        lambda value: "● Manual fallback" if "manual" in value.lower() else "● Missing" if "missing" in value.lower() else "● Live")
+    stale_flags = existing.get("price_stale", pd.Series(False, index=existing.index)).fillna(False).astype(bool)
+    display["Data quality"] = [
+        "● Stale live price" if stale and "live" in value.lower()
+        else "● Scalable screenshot" if "scalable" in value.lower()
+        else "● Manual fallback" if "manual" in value.lower()
+        else "● Missing" if "missing" in value.lower() else "● Live market data"
+        for value, stale in zip(source, stale_flags)]
     valuation_ready = existing.get("valuation_ready", pd.Series(False, index=existing.index)).fillna(False)
     recommendation_ready = existing.get("recommendation_ready", pd.Series(False, index=existing.index)).fillna(False)
     display["Readiness"] = ["● Recommendation ready" if rec else "● Valuation ready" if val else "● Review required"
@@ -636,6 +686,22 @@ def _run_data_enrichment(force_web: bool = False, selected_isin: str | None = No
         if target in {"all", "candidates"}:
             candidates, candidate_audit = engine.enrich_assets(candidates, True, force_web)
         audit = pd.concat([holding_audit, candidate_audit], ignore_index=True)
+    enrichment_source_rows = []
+    for frame in (holdings, candidates):
+        for _, asset in frame.iterrows():
+            enrichment_source_rows.extend(suggestion_audit_rows(asset.to_dict()))
+            resolution = asset.get("symbol_resolution")
+            if isinstance(resolution, dict):
+                payload = {**resolution, "asset_key": str(asset.get("isin") or asset.get("instrument")),
+                           "isin": asset.get("isin", ""), "instrument": asset.get("instrument", "")}
+                try: database.save_symbol_resolution(payload)
+                except (AttributeError, SupabaseConnectionError): pass
+    try:
+        database.save_data_audit(enrichment_source_rows)
+        if enrichment_source_rows:
+            st.session_state.source_audit = pd.concat(
+                [pd.DataFrame(enrichment_source_rows), st.session_state.source_audit], ignore_index=True).head(2000)
+    except (AttributeError, SupabaseConnectionError): pass
     st.session_state.holdings = holdings_to_dataframe(holdings.to_dict("records"))
     st.session_state.candidates = _normalise_candidates(candidates)
     st.session_state.enrichment_audit = audit
@@ -678,16 +744,7 @@ def _merge_scanned_asset(result: dict) -> None:
                 "confidence": asset.get("data_confidence", "Low"), "extraction_method": "staged source waterfall",
                 "user_confirmed": bool(asset.get("confirmed_by_user", False)),
                 "conflict": (asset.get("metadata_conflicts") or {}).get(field)})
-    for field, suggestion in (asset.get("enrichment_suggestions") or {}).items():
-        if not isinstance(suggestion, dict) or suggestion.get("value") in (None, ""):
-            continue
-        audit_rows.append({"asset_key": key, "isin": asset.get("isin", ""), "field_name": field,
-            "field_value": suggestion.get("value"), "provider": suggestion.get("provider", "Unknown"),
-            "source_url": suggestion.get("source_url", asset.get("source_url", "")),
-            "source_title": suggestion.get("source_title", "Suggested value"),
-            "fetched_at": suggestion.get("fetched_at") or datetime.now(timezone.utc).isoformat(),
-            "confidence": suggestion.get("confidence", "Low"), "extraction_method": "provider suggestion",
-            "user_confirmed": False, "conflict": (asset.get("metadata_conflicts") or {}).get(field)})
+    audit_rows.extend(suggestion_audit_rows(asset))
     try:
         database.save_data_audit(audit_rows)
         st.session_state.source_audit = pd.concat([pd.DataFrame(audit_rows), st.session_state.source_audit],
@@ -700,17 +757,28 @@ def _repair_symbols_on_demand(progress_callback=None) -> dict:
     assets = st.session_state.holdings.to_dict("records") + st.session_state.candidates.to_dict("records")
     results = repair_symbol_batch(assets, resolver, max_workers=4, progress_callback=progress_callback)
     for item in results:
-        try: database.save_symbol_resolution({**item["resolution"], "asset_key": str(item["asset"].get("isin") or item["asset"].get("instrument")),
-                                               "isin": item["asset"].get("isin", ""), "instrument": item["asset"].get("instrument", "")})
+        saved_resolution = {**item["resolution"], "asset_key": str(item["asset"].get("isin") or item["asset"].get("instrument")),
+                            "isin": item["asset"].get("isin", ""),
+                            "instrument": item["asset"].get("instrument", "")}
+        try: database.save_symbol_resolution(saved_resolution)
         except (AttributeError, SupabaseConnectionError): pass
+        cache_rows = [row for row in st.session_state.get("symbol_resolution_cache", [])
+                      if row.get("asset_key") != saved_resolution["asset_key"]]
+        st.session_state.symbol_resolution_cache = [saved_resolution] + cache_rows
     chosen = {str(item["asset"].get("isin") or item["asset"].get("instrument")): item["resolution"].get("chosen_symbol")
               for item in results if item["resolution"].get("chosen_symbol")}
     if chosen:
         holdings = st.session_state.holdings.copy(); candidates = st.session_state.candidates.copy()
         for index, row in holdings.iterrows():
-            key = str(row.get("isin") or row.get("instrument")); holdings.loc[index, "price_symbol"] = chosen.get(key, row.get("price_symbol", ""))
+            key = str(row.get("isin") or row.get("instrument"))
+            if chosen.get(key):
+                holdings.loc[index, "resolved_price_symbol"] = chosen[key]
+                if not str(row.get("price_symbol", "") or "").strip(): holdings.loc[index, "price_symbol"] = chosen[key]
         for index, row in candidates.iterrows():
-            key = str(row.get("isin") or row.get("instrument")); candidates.loc[index, "price_symbol"] = chosen.get(key, row.get("price_symbol", ""))
+            key = str(row.get("isin") or row.get("instrument"))
+            if chosen.get(key):
+                candidates.loc[index, "resolved_price_symbol"] = chosen[key]
+                if not str(row.get("price_symbol", "") or "").strip(): candidates.loc[index, "price_symbol"] = chosen[key]
         st.session_state.holdings = holdings_to_dataframe(holdings.to_dict("records"))
         st.session_state.candidates = _normalise_candidates(candidates)
         database.save_holdings(st.session_state.holdings); database.save_candidates(st.session_state.candidates)
@@ -858,8 +926,11 @@ def portfolio_section():
     with cards[4]: render_metric_card("Unrealised P/L", f"€{profit:+,.0f}", f"{profit / invested * 100:+.2f}%" if invested else "—",
                                       "positive" if profit >= 0 else "negative")
     with cards[5]: render_metric_card("Cash", f"€{cash:,.0f}", f"{cash / total * 100:.1f}%" if total else "—")
-    fallback_count = int(((details["price_source"] == "Manual fallback") & (details["category"] != "Cash")).sum())
-    with cards[6]: render_metric_card("Data quality", f"{len(details)-fallback_count}/{len(details)} live", f"{fallback_count} fallback", "warning" if fallback_count else "positive")
+    non_cash = details[details["category"] != "Cash"]
+    live_count = int((non_cash["price_source"] == "Live market data").sum())
+    fallback_count = int(non_cash["price_source"].isin(["Manual fallback", "Scalable screenshot"]).sum())
+    with cards[6]: render_metric_card("Data quality", f"{live_count}/{len(non_cash)} live",
+                                      f"{fallback_count} confirmed fallback", "warning" if fallback_count else "positive")
     action_left, action_right = st.columns([1, 3])
     if action_left.button("Refresh all prices and metadata", type="primary", use_container_width=True):
         with st.spinner("Refreshing prices, FX, identifiers, and available metadata..."):
@@ -1117,10 +1188,12 @@ def market_data_news_section():
         st.dataframe(pd.DataFrame(providers), width="stretch", hide_index=True)
 
     render_section_card("2. Data Coverage", "Coverage is calculated from cached holdings and candidates; it does not trigger network requests.")
-    coverage_items = [("Price", "price_coverage"), ("Metadata", "metadata_coverage"), ("TER/cost", "ter_coverage"),
+    render_metric_card("Total assets", int(coverage.get("total_assets", 0)), "Holdings and candidates")
+    coverage_items = [("Price", "price_coverage"), ("Symbol", "symbol_coverage"),
+                      ("Metadata", "metadata_coverage"), ("TER/cost", "ter_coverage"),
                       ("FX", "fx_coverage"), ("Factsheet", "factsheet_coverage"), ("News", "news_coverage"),
                       ("Recommendation-ready", "recommendation_ready"), ("Valuation-ready", "valuation_ready")]
-    for start in (0, 4):
+    for start in range(0, len(coverage_items), 4):
         coverage_cols = st.columns(4)
         for column, (label, key) in zip(coverage_cols, coverage_items[start:start + 4]):
             value = float(coverage.get(key, 0)); tone = "positive" if value >= 90 else "warning" if value >= 75 else "negative"
@@ -1128,6 +1201,12 @@ def market_data_news_section():
     if coverage["price_coverage"] < 90: render_alert("Price coverage is below 90%; valuation confidence is reduced.", "warning")
     if coverage["metadata_coverage"] < 75: render_alert("Metadata coverage is below 75%; strategy and scoring confidence are reduced.", "warning")
     if coverage["ter_coverage"] < 75: render_alert("ETF TER/cost coverage is below 75%; incomplete ETF candidates remain blocked from buy/add.", "danger")
+    if not gap_report.empty:
+        preview_columns = st.columns(min(3, len(gap_report)))
+        for column, (_, gap) in zip(preview_columns, gap_report.head(3).iterrows()):
+            with column:
+                gap_card(gap.get("Asset"), gap.get("Missing field"), gap.get("Error"),
+                         gap.get("Suggested next action"), "Low")
     with st.expander("Open precise Data Gap Report", expanded=False):
         if gap_report.empty: render_empty_state("No detected gaps", "Cached data currently satisfies the configured coverage checks.")
         else: st.dataframe(gap_report, width="stretch", hide_index=True)

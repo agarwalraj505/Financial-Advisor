@@ -22,7 +22,7 @@ def test_calculating_live_value_from_quantity_and_price():
     valued = valuate_holdings(holding(), {"TEST": quote}, {"EUR": 1})
     assert calculate_position_value(2, 50) == 100
     assert valued.loc[0, "current_value_eur"] == 100
-    assert valued.loc[0, "price_source"] == "Live"
+    assert valued.loc[0, "price_source"] == "Live market data"
 
 
 def test_manual_price_fallback():
@@ -35,7 +35,8 @@ def test_manual_price_fallback():
 def test_cached_live_price_is_used_without_network_quote():
     valued = valuate_holdings(holding(live_current_price=11, manual_current_price=9), {}, {"EUR": 1})
     assert valued.loc[0, "current_value_eur"] == 22
-    assert valued.loc[0, "price_source"] == "Cached live"
+    assert valued.loc[0, "price_source"] == "Live market data"
+    assert bool(valued.loc[0, "price_stale"]) is True
 
 
 def test_non_eur_conversion_logic():
@@ -43,6 +44,49 @@ def test_non_eur_conversion_logic():
     valued = valuate_holdings(holding(currency="USD"), {"TEST": quote}, {"USD": 0.8})
     assert valued.loc[0, "current_value_eur"] == 80
     assert valued.loc[0, "fx_rate_to_eur"] == 0.8
+
+
+def test_gbx_pence_conversion_uses_one_hundredth_of_gbp_rate():
+    quote = MarketQuote("TEST", latest_price=100, currency="GBp")
+    valued = valuate_holdings(holding(currency="GBX"), {"TEST": quote}, {"GBP": 1.18})
+    assert valued.loc[0, "fx_rate_to_eur"] == 0.0118
+    assert valued.loc[0, "current_value_eur"] == 2.36
+
+
+def test_scalable_screenshot_price_precedes_manual_fallback():
+    valued = valuate_holdings(holding(current_price_eur=45, source="Scalable screenshot",
+                                      user_confirmed=True, manual_current_price=40), {}, {"EUR": 1})
+    assert valued.loc[0, "current_value_eur"] == 90
+    assert valued.loc[0, "price_source"] == "Scalable screenshot"
+
+
+def test_live_price_precedes_screenshot_and_manual_prices():
+    quote = MarketQuote("TEST", latest_price=50, currency="EUR")
+    valued = valuate_holdings(holding(current_price_eur=45, source="Scalable screenshot",
+                                      manual_current_price=40), {"TEST": quote}, {"EUR": 1})
+    assert valued.loc[0, "current_value_eur"] == 100
+    assert valued.loc[0, "price_source"] == "Live market data"
+
+
+def test_expired_cached_quote_is_valued_but_marked_stale():
+    quote = MarketQuote("TEST", latest_price=50, currency="EUR", stale=True)
+    valued = valuate_holdings(holding(), {"TEST": quote}, {"EUR": 1})
+    assert valued.loc[0, "current_value_eur"] == 100
+    assert bool(valued.loc[0, "price_stale"]) is True
+
+
+def test_missing_price_is_explicit_and_does_not_invent_value():
+    valued = valuate_holdings(holding(manual_current_price=0, current_value_eur=0), {}, {"EUR": 1})
+    assert valued.loc[0, "current_value_eur"] == 0
+    assert valued.loc[0, "price_source"] == "Missing"
+    assert "Price missing" in valued.loc[0, "price_error"]
+
+
+def test_profit_and_loss_fields_are_recalculated_from_eur_value():
+    quote = MarketQuote("TEST", latest_price=50, currency="EUR")
+    valued = valuate_holdings(holding(buy_in_value_eur=80), {"TEST": quote}, {"EUR": 1})
+    assert valued.loc[0, "pl_eur"] == 20
+    assert valued.loc[0, "pl_percent"] == 25
 
 
 def test_daily_weekly_monthly_yearly_gains():

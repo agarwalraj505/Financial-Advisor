@@ -11,6 +11,7 @@ from providers.base import ProviderResult
 from providers.openfigi_provider import build_mapping_request
 from retry_queue import RetryQueue
 from symbol_resolver import SymbolResolver
+from symbol_resolver import avoid_recent_bad_symbols, generate_exchange_candidates
 
 
 class FailedProvider:
@@ -52,15 +53,41 @@ def test_symbol_resolver_stores_bad_candidates():
     assert "NOPE" in result["bad_symbols"]
 
 
+def test_symbol_resolver_chooses_first_symbol_with_price_and_history():
+    class Yahoo:
+        def get_price(self, symbol):
+            return ProviderResult(True, "yfinance", {"price": 10, "currency": "EUR"}, "High")
+        def get_history(self, symbol, period):
+            return ProviderResult(symbol == "GOOD.DE", "yfinance", {"history": [1, 2]} if symbol == "GOOD.DE" else {},
+                                  "High", error="no history" if symbol != "GOOD.DE" else "")
+    resolver = SymbolResolver(yahoo=Yahoo(), stooq=FailedProvider())
+    result = resolver.resolve_price_symbol({"isin": "DETEST-FIRST", "price_symbol": "BAD.DE",
+                                            "ticker_id": "GOOD", "instrument": "Good"})
+    assert result["chosen_symbol"] == "GOOD.DE"
+    assert result["candidate_symbols"][0]["status"] == "Bad"
+
+
+def test_exchange_candidates_cover_requested_european_suffixes():
+    candidates = generate_exchange_candidates({"ticker_id": "TEST", "isin": "DE000TEST000"})
+    for suffix in [".DE", ".F", ".SG", ".MU", ".BE", ".AS", ".MI", ".PA", ".L"]:
+        assert "TEST" + suffix in candidates
+
+
+def test_recent_bad_symbol_is_filtered():
+    now = datetime.now(timezone.utc).isoformat()
+    assert avoid_recent_bad_symbols(["BAD", "GOOD"], {"BAD": {"last_tested": now}}) == ["GOOD"]
+
+
 def test_data_coverage_calculation():
-    holdings = pd.DataFrame([{"instrument": "A", "manual_current_price": 10, "currency": "EUR",
+    holdings = pd.DataFrame([{"instrument": "A", "price_symbol": "A", "manual_current_price": 10, "currency": "EUR",
                               "category": "Core", "asset_type": "Stock", "valuation_ready": True}])
-    candidates = pd.DataFrame([{"instrument": "B", "manual_current_price": 20, "currency": "USD",
+    candidates = pd.DataFrame([{"instrument": "B", "price_symbol": "B", "manual_current_price": 20, "currency": "USD",
                                 "fx_rate_to_eur": .9, "category": "Growth", "asset_type": "ETF",
                                 "ter_pct": .2, "factsheet_url": "https://issuer.test/f.pdf",
                                 "recommendation_ready": True, "valuation_ready": True}])
     result = calculate_data_coverage(holdings, candidates, [{"title": "news"}])
     assert result["price_coverage"] == 100
+    assert result["symbol_coverage"] == 100
     assert result["metadata_coverage"] == 100
     assert result["ter_coverage"] == 100
     assert result["fx_coverage"] == 100

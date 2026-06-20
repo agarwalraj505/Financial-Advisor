@@ -23,7 +23,7 @@ class CoinGeckoProvider(BaseProvider):
         try:
             url = "https://api.coingecko.com/api/v3/simple/price?" + urlencode(
                 {"ids": coin_id, "vs_currencies": "eur"})
-            with urlopen(Request(url, headers=headers), timeout=15) as response:
+            with urlopen(Request(url, headers=headers), timeout=8) as response:
                 data = json.loads(response.read().decode("utf-8"))
             price = data.get(coin_id, {}).get("eur")
             return self.success({"price": float(price), "currency": "EUR"}, "Medium") if price else self.failure("CoinGecko price missing")

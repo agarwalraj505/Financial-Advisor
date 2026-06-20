@@ -100,7 +100,7 @@ def score_assets(assets: pd.DataFrame, research: pd.DataFrame, drift: pd.DataFra
         if _number(row.get("overlap_score"), 0) == 0:
             category_counts = settings.get("current_category_counts", {})
             row["overlap_score"] = min(10, _number(category_counts.get(str(row.get("category", ""))), 0) * 2)
-        metrics = research_lookup.get(str(row.get("price_symbol", "")), {})
+        metrics = research_lookup.get(str(row.get("resolved_price_symbol") or row.get("price_symbol", "")), {})
         quality = calculate_asset_quality(row, metrics, is_candidate=not is_current)
         current_value = _number(row.get("current_value_eur"), 0)
         projected_weight = current_value / total_portfolio * 100 if total_portfolio else 0

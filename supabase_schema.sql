@@ -101,7 +101,12 @@ alter table public.holdings
   add column if not exists distribution_policy text,
   add column if not exists domicile text,
   add column if not exists manual_spread_estimate_percent numeric,
-  add column if not exists last_updated timestamptz;
+  add column if not exists last_updated timestamptz,
+  add column if not exists data_source text,
+  add column if not exists source_url text,
+  add column if not exists data_confidence text,
+  add column if not exists exchange text,
+  add column if not exists resolved_price_symbol text;
 
 alter table public.candidate_assets
   add column if not exists valuation_ready boolean default false,
@@ -124,7 +129,11 @@ alter table public.candidate_assets
   add column if not exists suggested_asset_type text,
   add column if not exists suggested_category text,
   add column if not exists manual_review_attempted boolean default false,
-  add column if not exists last_auto_repair_at timestamptz;
+  add column if not exists last_auto_repair_at timestamptz,
+  add column if not exists wkn text,
+  add column if not exists exchange text,
+  add column if not exists last_updated_date text,
+  add column if not exists resolved_price_symbol text;
 
 alter table public.savings_plans
   add column if not exists category text,

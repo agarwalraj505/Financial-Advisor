@@ -29,6 +29,7 @@ PROVIDERS = (
     ProviderDefinition("GDELT", ("news",), 10),
     ProviderDefinition("RSS", ("news",), 10),
     ProviderDefinition("Web enrichment", ("search", "metadata", "factsheet"), 12),
+    ProviderDefinition("Web price", ("price",), 12),
     ProviderDefinition("FMP", ("fundamentals",), 8, "FMP_API_KEY", True),
     ProviderDefinition("Twelve Data", ("price",), 8, "TWELVE_DATA_API_KEY", True),
 )
@@ -36,6 +37,7 @@ PROVIDERS = (
 PURPOSES = {"yfinance": "Prices/history", "OpenFIGI": "ISIN mapping", "ECB": "FX rates",
             "Stooq": "Quote fallback", "CoinGecko": "Crypto fallback", "GDELT": "Market news",
             "RSS": "Market news", "Web enrichment": "ETF/fund metadata",
+            "Web price": "Public product-page price fallback",
             "FMP": "Fundamentals", "Twelve Data": "Backup prices"}
 
 

@@ -21,7 +21,7 @@ def _number(value, default=None):
 def critical_missing_fields(asset: dict | pd.Series) -> list[str]:
     missing = []
     asset_type = str(asset.get("asset_type", ""))
-    if not str(asset.get("price_symbol", "") or "").strip() and not (_number(asset.get("manual_current_price"), 0) or 0):
+    if not str(asset.get("resolved_price_symbol") or asset.get("price_symbol") or "").strip() and not (_number(asset.get("manual_current_price"), 0) or 0):
         missing.append("Price Symbol or manual current price")
     if not str(asset.get("category", "") or "").strip():
         missing.append("Category")

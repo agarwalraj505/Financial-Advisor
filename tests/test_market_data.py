@@ -50,6 +50,7 @@ def test_yahoo_gbp_pence_currency_is_preserved():
 
 def test_get_latest_price_uses_coingecko_for_crypto(monkeypatch):
     get_latest_price.clear()
+    monkeypatch.setattr(market_data.yf, "Ticker", lambda symbol: (_ for _ in ()).throw(ConnectionError("offline")))
     monkeypatch.setattr(market_data, "_coingecko_json", lambda path, params: {"bitcoin": {"eur": 60000}})
     assert get_latest_price("BTC-USD") == 60000
     get_latest_price.clear()

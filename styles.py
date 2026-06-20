@@ -116,6 +116,9 @@ html, body, [class*="css"] { font-family: Inter, ui-sans-serif, -apple-system, B
 .news-card a:hover { color:var(--fh-primary); }
 .news-meta { display:flex; flex-wrap:wrap; gap:.45rem; align-items:center; color:var(--fh-muted); font-size:.75rem; margin-top:.5rem; }
 .recommendation-card { border:1px solid var(--fh-line); border-left:4px solid var(--fh-primary); background:#FFFFFF; border-radius:18px; padding:1rem 1.05rem; margin:.62rem 0; }
+.gap-card { border:1px solid #F3D5A1; border-left:4px solid var(--fh-warning); background:#FFFBF2; border-radius:18px; padding:1rem 1.05rem; margin:.62rem 0; }
+.gap-card-head { display:flex; justify-content:space-between; align-items:center; gap:.75rem; }
+.gap-field { margin-top:.48rem; color:#8A5712; font-weight:720; }
 .recommendation-head { display:flex; justify-content:space-between; align-items:center; gap:1rem; }
 .recommendation-instrument { font-weight:720; letter-spacing:-.015em; }
 .recommendation-reason { color:var(--fh-muted); font-size:.87rem; line-height:1.48; margin-top:.55rem; }

@@ -66,3 +66,11 @@ def test_safe_toast_falls_back_to_success(monkeypatch):
 def test_app_has_no_direct_toast_calls():
     app_source = Path(__file__).parents[1].joinpath("app.py").read_text(encoding="utf-8")
     assert "st.toast(" not in app_source
+
+
+def test_source_and_gap_cards_render_safely(monkeypatch):
+    rendered = capture_markdown(monkeypatch)
+    ui.source_badge("Issuer", "High")
+    html = ui.gap_card("<ETF>", "TER", "Not verified", "Check factsheet", "Low")
+    assert rendered and "gap-card" in html
+    assert "&lt;ETF&gt;" in html

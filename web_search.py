@@ -17,12 +17,14 @@ def build_asset_search_queries(asset: dict) -> list[str]:
     wkn = str(asset.get("wkn", "") or "").strip()
     queries = []
     if isin:
-        queries += [f"{isin} TER factsheet fund size", f"{isin} KID UCITS ETF",
-                    f"{isin} Yahoo Finance", f"{isin} exchange ticker"]
+        queries += [f"{isin} price", f"{isin} ticker", f"{isin} Yahoo Finance",
+                    f"{isin} exchange ticker", f"{isin} TER factsheet", f"{isin} KID",
+                    f"{isin} UCITS ETF factsheet", f"{isin} fund size"]
     if name:
-        queries += [f'"{name}" ISIN', f'"{name}" factsheet TER', f'"{name}" issuer UCITS ETF ticker']
+        queries += [f'"{name}" ISIN', f'"{name}" TER factsheet', f'"{name}" fund size',
+                    f'"{name}" issuer UCITS ETF ticker']
     if wkn:
-        queries.append(f"{wkn} ETF factsheet")
+        queries += [f"{wkn} ETF factsheet", f"{wkn} price"]
     return list(dict.fromkeys(queries))
 
 

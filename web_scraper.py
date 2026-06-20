@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from html.parser import HTMLParser
-from io import BytesIO
 from math import isnan
 import re
+from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 from urllib.robotparser import RobotFileParser
@@ -31,6 +31,8 @@ def can_fetch_url(url: str) -> bool:
             robots_text = response.read(500_000).decode("utf-8", errors="ignore")
         parser = RobotFileParser(); parser.set_url(robots_url); parser.parse(robots_text.splitlines())
         return parser.can_fetch(USER_AGENT, url)
+    except HTTPError as exc:
+        return exc.code == 404  # No robots file means no published disallow rule.
     except Exception:
         return False  # uncertainty is treated conservatively
 
@@ -45,12 +47,8 @@ def fetch_page(url: str) -> str:
         with urlopen(request, timeout=12) as response:
             content_type = response.headers.get("Content-Type", "")
             if "pdf" in content_type.lower() or str(url).lower().endswith(".pdf"):
-                try:
-                    from pypdf import PdfReader
-                    reader = PdfReader(BytesIO(response.read(8_000_000)))
-                    return " ".join((page.extract_text() or "") for page in reader.pages[:40])
-                except Exception:
-                    return ""
+                from pdf_factsheet_parser import extract_pdf_text
+                return extract_pdf_text(response.read(12_000_000), 40)
             if "html" not in content_type.lower(): return ""
             return response.read(2_000_000).decode("utf-8", errors="ignore")
     except Exception:
@@ -80,7 +78,10 @@ def _number(text: str) -> float | None:
     if not text: return None
     cleaned = text.replace(" ", "").replace("€", "").replace("%", "")
     if "," in cleaned and "." in cleaned:
-        cleaned = cleaned.replace(".", "").replace(",", ".")
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
     elif "," in cleaned:
         cleaned = cleaned.replace(",", ".")
     try: return float(cleaned)
@@ -93,13 +94,23 @@ def extract_etf_metadata_from_text(text: str, source_url: str, isin: str | None 
     patterns = {
         "ter_percent": r"(?:TER|Total expense ratio|Ongoing charges|OCF)\s*[:\-]?\s*([0-9]+[\.,][0-9]+)\s*%",
         "ticker_id": r"(?:Ticker|Exchange ticker)\s*[:\-]?\s*([A-Z0-9\.\-]{1,15})",
+        "wkn": r"(?:WKN)\s*[:\-]?\s*([A-Z0-9]{6})",
+        "exchange": r"(?:Exchange|Trading venue|Listed on)\s*[:\-]?\s*([A-Za-z0-9 /\-]{2,35})",
         "inception_date": r"(?:Inception date|Launch date)\s*[:\-]?\s*([0-9]{1,2}[\./-][0-9]{1,2}[\./-][0-9]{2,4}|[0-9]{4}-[0-9]{2}-[0-9]{2})",
+        "last_updated_date": r"(?:Last updated|As of|Data as at)\s*[:\-]?\s*([0-9]{1,2}[\./-][0-9]{1,2}[\./-][0-9]{2,4}|[0-9]{4}-[0-9]{2}-[0-9]{2})",
     }
     for field, pattern in patterns.items():
         match = re.search(pattern, normalized, re.I)
         if match: result[field] = _number(match.group(1)) if field == "ter_percent" else match.group(1)
     found_isin = re.search(r"\b[A-Z]{2}[A-Z0-9]{10}\b", normalized)
     if found_isin: result["isin"] = found_isin.group(0)
+    price = re.search(r"(?:Last price|Closing price|Market price|NAV|Price)\s*[:\-]?\s*(EUR|USD|GBP|GBX|CHF|€|\$|£)?\s*([0-9]+(?:[\.,][0-9]{1,4})?)\s*(EUR|USD|GBP|GBX|CHF|€|\$|£)?", normalized, re.I)
+    if price:
+        value = _number(price.group(2))
+        currency_token = (price.group(1) or price.group(3) or "").upper()
+        currency_map = {"€": "EUR", "$": "USD", "£": "GBP"}
+        if value and value > 0: result["price"] = value
+        if currency_token: result["currency"] = currency_map.get(currency_token, currency_token)
     size = re.search(r"(?:Fund size|Assets under management|AUM)\s*[:\-]?\s*(?:EUR|€)?\s*([0-9]+[\.,]?[0-9]*)\s*(million|billion|m|bn)?", normalized, re.I)
     if size:
         value = _number(size.group(1)); unit = (size.group(2) or "").lower()
@@ -111,6 +122,8 @@ def extract_etf_metadata_from_text(text: str, source_url: str, isin: str | None 
     elif re.search(r"distributing|distribution", normalized, re.I): result["distribution_policy"] = "Distributing"
     domicile = re.search(r"Domicile\s*[:\-]?\s*(Ireland|Luxembourg|Germany)", normalized, re.I)
     if domicile: result["domicile"] = domicile.group(1).title()
+    issuer = re.search(r"(?:Issuer|Fund provider|Management company)\s*[:\-]?\s*([A-Za-z0-9 &\.\-]{2,80})", normalized, re.I)
+    if issuer: result["issuer"] = issuer.group(1).strip()
     isin_present = bool(isin and re.search(re.escape(isin), normalized, re.I))
     source = classify_source_url(source_url)
     confidence = source["confidence"]
@@ -124,7 +137,13 @@ def extract_metadata_from_url(url: str, asset: dict) -> dict:
     html = fetch_page(url)
     if not html:
         return {"source_url": url, "error": "Fetch blocked or failed", "extraction_confidence": "Low"}
-    metadata = extract_etf_metadata_from_text(extract_text(html), url, asset.get("isin"))
+    is_pdf = str(url).lower().split("?", 1)[0].endswith(".pdf")
+    metadata = extract_etf_metadata_from_text(html if is_pdf else extract_text(html), url, asset.get("isin"))
+    if is_pdf: metadata["extraction_method"] = "PDF text label-pattern extraction"
+    lower_url = str(url).lower()
+    if "factsheet" in lower_url: metadata["factsheet_url"] = url
+    if "kid" in lower_url or "kiid" in lower_url: metadata["kid_url"] = url
+    if is_pdf: return metadata
     parser = _TextParser(); parser.feed(html)
     for href in parser.links:
         absolute = urljoin(url, href)
@@ -146,9 +165,9 @@ def merge_scraped_metadata(asset: dict, scraped_results: list[dict]) -> dict:
     def missing(value):
         return value in (None, "") or (isinstance(value, float) and isnan(value))
     for result in scraped_results:
-        for field in ("isin", "price_symbol", "ticker_id", "ter_percent", "fund_size_eur", "replication_method",
+        for field in ("isin", "wkn", "price_symbol", "ticker_id", "exchange", "price", "ter_percent", "fund_size_eur", "replication_method",
                       "distribution_policy", "domicile", "inception_date", "issuer", "factsheet_url",
-                      "kid_url", "currency", "asset_type"):
+                      "kid_url", "currency", "asset_type", "last_updated_date"):
             value = result.get(field)
             if missing(value): continue
             app_field = {"ter_percent": "ter_pct"}.get(field, field)

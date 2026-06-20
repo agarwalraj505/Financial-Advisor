@@ -99,6 +99,11 @@ def generate_market_aware_recommendations(current: pd.DataFrame, candidates: pd.
                       if attempted else "Run the Market Data Engine before considering this candidate for buy/add.")
             rows.append(_row("No trade", purpose, asset, 0, 0, reason, configured))
             continue
+        if (str(asset.get("asset_type", "")) in {"ETF", "ETC", "ETP"}
+                and _number(settings.get("etf_candidate_ter_coverage"), 100) < 75):
+            rows.append(_row("No trade", "ETF cost coverage gate", asset, 0, 0,
+                             "New fund buy/add is blocked because verified ETF candidate TER coverage is below 75%.", configured))
+            continue
         scalable = bool(asset.get("scalable_compatible", False))
         direct_available = bool(asset.get("direct_trading_available", False))
         if not scalable:

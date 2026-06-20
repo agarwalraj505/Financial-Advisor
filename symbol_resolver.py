@@ -15,22 +15,40 @@ def asset_key(asset: dict) -> str:
     return str(asset.get("id") or asset.get("isin") or asset.get("wkn") or asset.get("instrument") or "").strip()
 
 
-def generate_yahoo_candidates(asset: dict) -> list[str]:
-    candidates = []
+def generate_exchange_candidates(asset: dict) -> list[str]:
+    """Generate a bounded, deterministic exchange list instead of random retries."""
     exact = str(asset.get("price_symbol", "") or "").strip()
     ticker = str(asset.get("ticker_id", "") or "").strip().upper()
     figi = str(asset.get("openfigi_ticker", "") or "").strip().upper()
     exchange = str(asset.get("exchange", "") or "").strip().upper()
     exchange_suffix = {"GR": ".DE", "GY": ".DE", "XETR": ".DE", "GF": ".F", "NA": ".AS",
                        "IM": ".MI", "FP": ".PA", "LN": ".L"}.get(exchange, "")
-    for value in (exact, figi):
-        if value: candidates.append(value)
-    if ticker and exchange_suffix: candidates.append(ticker + exchange_suffix)
-    for base in (ticker, figi):
-        if base: candidates.extend(base if not suffix or base.endswith(suffix) else base + suffix for suffix in EU_SUFFIXES)
+    candidates = [exact] if exact else []
+    for base in (figi, ticker):
+        if not base: continue
+        if exchange_suffix: candidates.append(base + exchange_suffix)
+        is_us = str(asset.get("isin", "")).upper().startswith("US") or str(asset.get("region", "")).lower() in {"us", "usa", "united states"}
+        suffixes = ([""] + EU_SUFFIXES[:-1]) if is_us else EU_SUFFIXES
+        candidates.extend(base if not suffix or base.endswith(suffix) else base + suffix for suffix in suffixes)
     isin = str(asset.get("isin", "") or "").strip()
     if isin: candidates.extend([isin + ".SG", isin])
     return list(dict.fromkeys(value for value in candidates if value))[:24]
+
+
+def generate_yahoo_candidates(asset: dict) -> list[str]:
+    return generate_exchange_candidates(asset)
+
+
+def avoid_recent_bad_symbols(symbols: list[str], bad_symbols: dict | None = None) -> list[str]:
+    bad_symbols = bad_symbols or {}
+    return [symbol for symbol in symbols
+            if symbol not in bad_symbols or not SymbolResolver._bad_is_fresh(bad_symbols[symbol])]
+
+
+def is_probably_invalid_symbol_error(error: str) -> bool:
+    text = str(error or "").lower()
+    return any(term in text for term in ("no usable", "no price data", "possibly delisted",
+                                          "not found", "no timezone", "invalid symbol"))
 
 
 class SymbolResolver:
@@ -70,21 +88,23 @@ class SymbolResolver:
         yahoo = self.yahoo.get_price(symbol)
         if yahoo.success:
             history = self.yahoo.get_history(symbol, "1mo")
-            return {"symbol": symbol, "status": "Working", "price_available": True,
-                    "history_available": history.success, "currency": yahoo.data.get("currency", ""),
-                    "source": "yfinance", "error": "", "last_tested": yahoo.fetched_at}
+            if history.success:
+                return {"symbol": symbol, "status": "Working", "price_available": True,
+                        "history_available": True, "currency": yahoo.data.get("currency", ""),
+                        "source": "yfinance", "error": "", "last_tested": yahoo.fetched_at}
         stooq = self.stooq.get_price(symbol)
-        if stooq.success:
+        if stooq.success and stooq.data.get("history_rows", 0) > 1:
             return {"symbol": symbol, "status": "Working", "price_available": True,
-                    "history_available": stooq.data.get("history_rows", 0) > 1, "currency": "",
+                    "history_available": True, "currency": "",
                     "source": "Stooq", "error": "", "last_tested": stooq.fetched_at}
         return {"symbol": symbol, "status": "Bad", "price_available": False, "history_available": False,
-                "currency": "", "source": "yfinance + Stooq", "error": yahoo.error or stooq.error,
+                "currency": "", "source": "yfinance + Stooq",
+                "error": ("Price returned without recent history" if yahoo.success else yahoo.error) or stooq.error,
                 "last_tested": datetime.now(timezone.utc).isoformat()}
 
     @staticmethod
     def select_best_symbol(tested: list[dict]) -> dict | None:
-        working = [item for item in tested if item.get("price_available")]
+        working = [item for item in tested if item.get("price_available") and item.get("history_available")]
         return max(working, key=lambda item: (item.get("currency") == "EUR", item.get("history_available"),
                                               item.get("source") == "yfinance")) if working else None
 
@@ -94,8 +114,7 @@ class SymbolResolver:
         if cached.get("chosen_symbol") and tested_at and datetime.now(timezone.utc) - tested_at < timedelta(days=7):
             return cached
         bad = dict(cached.get("bad_symbols") or {}); tested = []
-        for symbol in generate_yahoo_candidates(asset):
-            if symbol in bad and self._bad_is_fresh(bad[symbol]): continue
+        for symbol in avoid_recent_bad_symbols(generate_yahoo_candidates(asset), bad):
             result = self.test_symbol(symbol); tested.append(result)
             if result["status"] == "Working":
                 resolution = {"chosen_symbol": symbol, "candidate_symbols": tested, "bad_symbols": bad,

@@ -44,3 +44,17 @@ def test_incomplete_existing_holding_is_not_sold_on_low_score_alone():
     result = generate_market_aware_recommendations(current, pd.DataFrame(), drift, SETTINGS)
     assert result.loc[0, "Action"] == "Hold"
     assert "manual review" in result.loc[0, "Reason"].lower()
+
+
+def test_low_candidate_ter_coverage_blocks_new_etf_buy():
+    candidate = pd.DataFrame([{"instrument": "Ready ETF", "isin": "NEW", "ticker_id": "N",
+                               "asset_type": "ETF", "category": "Core", "total_score": 9,
+                               "recommendation_ready": True, "latest_price_eur": 100,
+                               "fractional_allowed": False, "savings_plan_available": True,
+                               "scalable_compatible": True, "direct_trading_available": True,
+                               "data_confidence": "High", "data_source": "Issuer"}])
+    drift = pd.DataFrame([{"category": "Core", "status": "Underweight", "drift_eur": -500}])
+    settings = {**SETTINGS, "etf_candidate_ter_coverage": 50}
+    result = generate_market_aware_recommendations(pd.DataFrame(), candidate, drift, settings)
+    assert result.loc[0, "Action"] == "No trade"
+    assert "below 75%" in result.loc[0, "Reason"]

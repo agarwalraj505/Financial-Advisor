@@ -6,7 +6,9 @@ from providers.fmp_provider import FMPProvider
 from providers.openfigi_provider import OpenFIGIProvider
 from providers.stooq_provider import StooqProvider
 from providers.twelvedata_provider import TwelveDataProvider
+from providers.web_price_provider import WebPriceProvider
 from providers.yfinance_provider import YFinanceProvider
 
 __all__ = ["YFinanceProvider", "OpenFIGIProvider", "ECBProvider", "CoinGeckoProvider",
            "StooqProvider", "FMPProvider", "TwelveDataProvider"]
+__all__.append("WebPriceProvider")

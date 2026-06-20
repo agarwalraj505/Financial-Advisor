@@ -22,6 +22,7 @@ from sentiment_engine import create_market_sentiment_summary
 from strategy_engine import get_current_strategy, refresh_market_strategy
 from web_scraper import (extract_etf_metadata_from_text, extract_metadata_from_url,
                          merge_scraped_metadata)
+from pdf_factsheet_parser import parse_pdf_factsheet_text
 
 
 def complete_asset(**updates):
@@ -108,9 +109,27 @@ def test_etf_metadata_patterns_and_high_confidence():
     assert result["extraction_confidence"] == "High"
 
 
+def test_public_product_text_extracts_labelled_price_wkn_and_currency():
+    text = "ISIN IE00TEST0001 WKN ABC123 Last price: EUR 12.34 Exchange: Xetra"
+    result = extract_etf_metadata_from_text(text, "https://www.ishares.com/product", "IE00TEST0001")
+    assert result["price"] == 12.34
+    assert result["currency"] == "EUR"
+    assert result["wkn"] == "ABC123"
+    assert result["exchange"].startswith("Xetra")
+
+
 def test_missing_isin_reduces_extraction_confidence():
     result = extract_etf_metadata_from_text("TER 0.20%", "https://www.ishares.com/factsheet", "IE00MISSING1")
     assert result["extraction_confidence"] == "Low"
+
+
+def test_pdf_text_ter_and_fund_metadata_extraction():
+    text = "ISIN IE00TEST0001 Ongoing charges: 0.18% AUM EUR 750 million Distributing"
+    result = parse_pdf_factsheet_text(text, "https://www.ishares.com/product-factsheet.pdf", "IE00TEST0001")
+    assert result["ter_percent"] == .18
+    assert result["fund_size_eur"] == 750_000_000
+    assert result["distribution_policy"] == "Distributing"
+    assert result["extraction_method"].startswith("PDF")
 
 
 def test_user_entered_value_is_not_overwritten_and_conflict_is_stored():
@@ -170,6 +189,14 @@ def test_full_pipeline_calls_every_stage_in_order():
     result = run_full_rebalance_pipeline(steps)
     assert called == PIPELINE_STEPS
     assert result["run_status"] == "Completed"
+
+
+def test_full_pipeline_reaches_and_saves_report_stage():
+    saved = []
+    steps = {name: (lambda results, stage=name: saved.append(stage) if stage == "save_run" else stage)
+             for name in PIPELINE_STEPS}
+    run_full_rebalance_pipeline(steps)
+    assert saved == ["save_run"]
 
 
 def test_european_number_parsing():

@@ -13,7 +13,8 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-CRYPTO_IDS = {"BTC-USD": "bitcoin", "ETH-USD": "ethereum", "SOL-USD": "solana"}
+CRYPTO_IDS = {"BTC-USD": "bitcoin", "BTC-EUR": "bitcoin", "ETH-USD": "ethereum",
+              "ETH-EUR": "ethereum", "SOL-USD": "solana", "SOL-EUR": "solana"}
 
 
 def _secret(name: str, default="") -> str:
@@ -64,6 +65,7 @@ class MarketQuote:
     fetched_at: str = ""
     histories: dict[str, pd.DataFrame] = field(default_factory=dict)
     error: str = ""
+    stale: bool = False
 
     @property
     def is_available(self) -> bool:
@@ -93,10 +95,12 @@ def fetch_market_quote(symbol: str) -> MarketQuote:
         return quote
     try:
         ticker = yf.Ticker(symbol)
-        histories = {
-            period: ticker.history(period=period, interval="1d", auto_adjust=False)
-            for period in ("5d", "1mo", "1y")
-        }
+        histories = {}
+        for period in ("5d", "1mo", "1y"):
+            try:
+                histories[period] = ticker.history(period=period, interval="1d", auto_adjust=False, timeout=8)
+            except TypeError:  # Lightweight test doubles and older yfinance releases.
+                histories[period] = ticker.history(period=period, interval="1d", auto_adjust=False)
         quote.histories = histories
         fast_info = ticker.fast_info
         quote.latest_price = _fast_info_value(fast_info, "last_price") or _last_close(histories["5d"])
@@ -177,38 +181,46 @@ def openfigi_mapping_payload(identifier: str, id_type: str = "ID_ISIN") -> list[
 
 @st.cache_data(ttl=900, show_spinner=False)
 def get_latest_price(symbol: str) -> float | None:
-    """Return the latest free-provider estimate; crypto tries CoinGecko first."""
+    """Return yfinance first; CoinGecko is a no-key crypto fallback."""
     symbol = str(symbol or "").strip()
     if not symbol:
         return None
+    yahoo_symbol = symbol if not symbol.lower().startswith("coingecko:") else ""
+    if yahoo_symbol:
+        try:
+            ticker = yf.Ticker(yahoo_symbol)
+            price = _fast_info_value(ticker.fast_info, "last_price")
+            if price: return float(price)
+            history = ticker.history(period="5d", interval="1d", auto_adjust=False, timeout=8)
+            price = _last_close(history)
+            if price: return price
+        except Exception:
+            pass
     coin_id = _coingecko_id(symbol)
     if coin_id:
         try:
             data = _coingecko_json("simple/price", {"ids": coin_id, "vs_currencies": "eur"})
             price = data.get(coin_id, {}).get("eur")
-            if price:
-                return float(price)
+            if price: return float(price)
         except Exception:
             pass
-    yahoo_symbol = symbol if not symbol.lower().startswith("coingecko:") else ""
-    if not yahoo_symbol:
-        return None
-    try:
-        ticker = yf.Ticker(yahoo_symbol)
-        price = _fast_info_value(ticker.fast_info, "last_price")
-        if price:
-            return float(price)
-        return _last_close(ticker.history(period="5d", interval="1d", auto_adjust=False))
-    except Exception:
-        return None
+    return None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_price_history(symbol: str, period: str = "1y") -> pd.DataFrame:
-    """Return daily close history from CoinGecko or yfinance."""
+    """Return yfinance history first, then CoinGecko for supported crypto."""
     symbol = str(symbol or "").strip()
     if not symbol:
         return pd.DataFrame()
+    explicit_coingecko = symbol.lower().startswith("coingecko:")
+    yahoo_symbol = "" if explicit_coingecko else symbol
+    if yahoo_symbol:
+        try:
+            history = yf.Ticker(yahoo_symbol).history(period=period, interval="1d", auto_adjust=False, timeout=8)
+            if history is not None and not history.empty: return history
+        except Exception:
+            pass
     coin_id = _coingecko_id(symbol)
     if coin_id:
         try:
@@ -220,15 +232,8 @@ def get_price_history(symbol: str, period: str = "1y") -> pd.DataFrame:
                 index = pd.to_datetime([item[0] for item in prices], unit="ms", utc=True)
                 return pd.DataFrame({"Close": [float(item[1]) for item in prices]}, index=index)
         except Exception:
-            if symbol.lower().startswith("coingecko:"):
-                return pd.DataFrame()
-    yahoo_symbol = symbol if not symbol.lower().startswith("coingecko:") else ""
-    if not yahoo_symbol:
-        return pd.DataFrame()
-    try:
-        return yf.Ticker(yahoo_symbol).history(period=period, interval="1d", auto_adjust=False)
-    except Exception:
-        return pd.DataFrame()
+            pass
+    return pd.DataFrame()
 
 
 def get_returns(symbol: str) -> dict[str, float | None]:
@@ -254,7 +259,7 @@ def get_fx_rate_to_eur(currency: str) -> float | None:
 
 @st.cache_data(ttl=43200, show_spinner=False)
 def get_quote_currency(symbol: str) -> str:
-    if _coingecko_id(symbol):
+    if str(symbol).lower().startswith("coingecko:"):
         return "EUR"
     try:
         return normalise_currency(_fast_info_value(yf.Ticker(symbol).fast_info, "currency")) or "EUR"
@@ -264,17 +269,28 @@ def get_quote_currency(symbol: str) -> str:
 
 def enrich_holding_with_market_data(row: dict) -> dict:
     enriched = dict(row)
-    symbol = str(enriched.get("price_symbol", "") or "")
+    symbol = str(enriched.get("resolved_price_symbol") or enriched.get("price_symbol") or "")
     live_price = get_latest_price(symbol) if symbol else None
+    screenshot_price = float(enriched.get("current_price_eur", 0) or 0)
+    screenshot_evidence = bool(enriched.get("screenshot_path") or enriched.get("screenshot_captured_at") or
+                               str(enriched.get("source", "")).lower().startswith("scalable") or
+                               enriched.get("user_confirmed"))
     manual_price = float(enriched.get("manual_current_price", 0) or 0)
     currency = "EUR" if _coingecko_id(symbol) and live_price else str(enriched.get("currency", "EUR") or "EUR")
-    fx = get_fx_rate_to_eur(currency) or float(enriched.get("fx_rate_to_eur", 1) or 1)
-    selected = live_price or manual_price
-    source = "CoinGecko" if live_price and _coingecko_id(symbol) else "Yahoo Finance" if live_price else "Manual fallback" if manual_price else "Missing"
+    fx = get_fx_rate_to_eur(currency)
+    if fx is None: fx = float(enriched.get("fx_rate_to_eur", 0) or 0)
+    if live_price:
+        selected, source = live_price, "Live market data"
+    elif screenshot_price and screenshot_evidence:
+        selected, source, currency, fx = screenshot_price, "Scalable screenshot", "EUR", 1.0
+    elif manual_price:
+        selected, source = manual_price, "Manual fallback"
+    else:
+        selected, source = 0.0, "Missing"
     quantity = float(enriched.get("quantity", 0) or 0)
-    current_value = quantity * selected * fx
+    current_value = quantity * selected * fx if fx else 0.0
     buy_in = float(enriched.get("buy_in_value_eur", 0) or 0)
-    enriched.update({"live_current_price": float(live_price or 0), "price_source": source,
+    enriched.update({"live_current_price": float(live_price or 0), "selected_price": float(selected), "price_source": source,
                      "currency": currency, "fx_rate_to_eur": fx, "current_value_eur": round(current_value, 2),
                      "pl_eur": round(current_value - buy_in, 2),
                      "pl_pct": round((current_value - buy_in) / buy_in * 100, 2) if buy_in else 0})
@@ -283,7 +299,7 @@ def enrich_holding_with_market_data(row: dict) -> dict:
 
 def enrich_candidate_with_market_data(row: dict) -> dict:
     enriched = dict(row)
-    symbol = str(enriched.get("price_symbol", "") or "")
+    symbol = str(enriched.get("resolved_price_symbol") or enriched.get("price_symbol") or "")
     price = get_latest_price(symbol) if symbol else None
     enriched.update({"latest_price": price, "data_source": "CoinGecko" if price and _coingecko_id(symbol)
                      else "Yahoo Finance" if price else enriched.get("data_source") or "Manual review required",
@@ -293,6 +309,9 @@ def enrich_candidate_with_market_data(row: dict) -> dict:
 
 def get_market_quote(symbol: str) -> MarketQuote:
     """Build the common quote object using provider priority and graceful fallback."""
+    quote = fetch_market_quote(symbol)
+    if quote.is_available:
+        return quote
     price = get_latest_price(symbol)
     histories = {period: get_price_history(symbol, period) for period in ("5d", "1mo", "1y")}
     five_day = histories["5d"]
@@ -302,4 +321,4 @@ def get_market_quote(symbol: str) -> MarketQuote:
     return MarketQuote(symbol=symbol, latest_price=price, previous_close=previous,
                        currency=get_quote_currency(symbol),
                        fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds") if price else "",
-                       histories=histories, error="" if price else "Live price unavailable")
+                       histories=histories, error="" if price else quote.error or "Live price unavailable")
