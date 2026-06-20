@@ -1,4 +1,5 @@
 import ui_components as ui
+from pathlib import Path
 
 
 def capture_markdown(monkeypatch):
@@ -43,3 +44,25 @@ def test_concise_public_component_helpers(monkeypatch):
     ui.action_card("Refresh", "Update market evidence", "Refresh now")
     ui.progress_step("Prices", "Done")
     assert len(rendered) == 3
+
+
+def test_safe_toast_uses_only_valid_icons(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ui.st, "toast", lambda message, **kwargs: calls.append((message, kwargs)))
+    ui.safe_toast("Saved", "✅")
+    ui.safe_toast("Fallback", "check")
+    assert calls[0][1] == {"icon": "✅"}
+    assert calls[1][1] == {}
+
+
+def test_safe_toast_falls_back_to_success(monkeypatch):
+    successes = []
+    monkeypatch.setattr(ui.st, "toast", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("bad icon")))
+    monkeypatch.setattr(ui.st, "success", lambda message: successes.append(message))
+    ui.safe_toast("Still visible", "✅")
+    assert successes == ["Still visible"]
+
+
+def test_app_has_no_direct_toast_calls():
+    app_source = Path(__file__).parents[1].joinpath("app.py").read_text(encoding="utf-8")
+    assert "st.toast(" not in app_source

@@ -14,6 +14,30 @@ from styles import DESIGN_TOKENS
 
 
 TONES = {"neutral", "info", "positive", "success", "warning", "negative", "danger"}
+VALID_TOAST_ICONS = {"✅", "⚠️", "❌", "ℹ️", "🔄", "💾", "📈", "📰", "🧠"}
+
+
+def safe_toast(message: str, icon: str | None = "✅"):
+    """Show a Streamlit toast without allowing invalid icon values to crash the app."""
+    try:
+        if icon in VALID_TOAST_ICONS:
+            st.toast(message, icon=icon)
+        else:
+            st.toast(message)
+    except Exception:
+        st.success(message)
+
+
+def set_flash_success(message: str) -> None:
+    """Persist a success message across the next st.rerun()."""
+    st.session_state["flash_success"] = str(message)
+
+
+def render_flash_message() -> None:
+    """Render and consume a success message saved before a rerun."""
+    message = st.session_state.pop("flash_success", None)
+    if message:
+        st.success(message)
 
 
 def _tone(tone: str) -> str:

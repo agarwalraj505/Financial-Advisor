@@ -6,6 +6,7 @@ import pandas as pd
 
 from asset_quality import assess_asset_readiness
 from master_rebalance import PIPELINE_STEPS, run_full_rebalance_pipeline
+from market_data_engine import assess_asset_readiness as engine_readiness
 from metadata_enrichment import merge_provider_data
 from news_provider import get_market_news
 from providers.ecb_provider import ECBProvider
@@ -29,6 +30,10 @@ def complete_asset(**updates):
            "scalable_compatible": True, "data_source": "Issuer", "data_confidence": "High"}
     row.update(updates)
     return row
+
+
+def test_market_data_engine_readiness_import_is_available():
+    assert callable(engine_readiness)
 
 
 def test_optional_paid_providers_start_disabled_without_keys(monkeypatch):

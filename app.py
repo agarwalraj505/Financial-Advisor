@@ -41,7 +41,7 @@ from ui_components import (create_allocation_chart, create_current_vs_target_cha
                            render_metric_card, render_news_card, render_page_header,
                            render_rebalance_summary, render_recommendation_card,
                            render_section_card, render_status_pill, render_strategy_summary_card,
-                           style_figure)
+                           render_flash_message, safe_toast, set_flash_success, style_figure)
 from valuation import calculate_historical_gains, portfolio_market_history, valuate_holdings
 
 st.set_page_config(page_title="Financial Hub", page_icon="◆", layout="wide",
@@ -266,7 +266,7 @@ def valuation_dashboard():
             **{f"{period}_gain_eur": gains[period]["eur"] if gains[period] else 0 for period in ["daily", "weekly", "monthly", "yearly"]},
             **{f"{period}_gain_pct": gains[period]["pct"] if gains[period] else 0 for period in ["daily", "weekly", "monthly", "yearly"]}}
         database.save_snapshot(snapshot)
-        st.toast("Valuation snapshot saved to Supabase", icon="✓")
+        safe_toast("Valuation snapshot saved to Supabase", "💾")
         history = database.load_snapshots()
     market_history = portfolio_market_history(details, st.session_state.quotes)
     if market_history.empty and not history.empty:
@@ -357,7 +357,7 @@ def current_portfolio():
         recompute_models(); st.rerun()
     a, b, c = st.columns(3)
     if a.button("Save portfolio to Supabase"):
-        database.save_holdings(st.session_state.holdings); st.toast("Portfolio saved to Supabase", icon="✓")
+        database.save_holdings(st.session_state.holdings); safe_toast("Portfolio saved to Supabase", "💾")
     if b.button("Reset sample holdings"):
         st.session_state.holdings = holdings_to_dataframe(SAMPLE_HOLDINGS); recompute_models(); st.rerun()
     c.download_button("Export holdings CSV", display.to_csv(index=False), "holdings_export.csv", "text/csv")
@@ -373,7 +373,7 @@ def upload_screenshots_page():
         st.image(image, caption=image.name, width=380)
         if st.button(f"Save {image.name} privately", key=f"save_image_{index}_{image.name}"):
             path = storage.upload(image.name, image.getvalue(), image.type or "application/octet-stream")
-            st.toast(f"Saved privately as {path}", icon="✓")
+            safe_toast(f"Saved privately as {path}", "💾")
 
 
 def candidate_universe():
@@ -405,7 +405,7 @@ def candidate_universe():
     a, b, c = st.columns(3)
     if a.button("Save candidate universe to Supabase"):
         database.save_candidates(st.session_state.scored_candidates)
-        st.toast("Candidate universe saved to Supabase", icon="✓")
+        safe_toast("Candidate universe saved to Supabase", "💾")
     if b.button("Reset sample candidates"):
         st.session_state.candidates = _normalise_candidates(pd.DataFrame(SAMPLE_CANDIDATES)); recompute_models(); st.rerun()
     c.download_button("Export candidate universe CSV", st.session_state.candidates.to_csv(index=False), "candidate_universe_export.csv", "text/csv")
@@ -509,12 +509,12 @@ def savings_plan_page():
             "Priority": "priority", "User approved": "user_approved"})
         persisted["current_plan"] = persisted["isin"].map(current_lookup).fillna(0.0)
         database.save_savings_plans(persisted)
-        st.toast("Savings-plan review saved to Supabase", icon="✓")
+        safe_toast("Savings-plan review saved to Supabase", "💾")
     if b.button("Apply optimizer recommendation"):
         applied = normalize_savings_plan_rows(result)
         applied["current_plan"] = applied["new_plan"]
         st.session_state.plans = _plans_with_categories(applied)
-        recompute_models(); st.toast("Optimizer recommendations applied to app records", icon="✓")
+        recompute_models(); safe_toast("Optimizer recommendations applied to app records", "✅")
     if c.button("Reset to current saved plans"):
         saved = database.load_savings_plans()
         st.session_state.plans = _plans_with_categories(saved if not saved.empty else pd.DataFrame(SAMPLE_SAVINGS_PLANS))
@@ -531,7 +531,7 @@ def recommendation_report_page():
     a, b = st.columns(2)
     a.download_button("Export recommendation report CSV", report.to_csv(index=False), "recommendation_report.csv", "text/csv")
     if b.button("Save report to Supabase history"):
-        database.save_recommendations(report); st.toast("Recommendation report saved", icon="✓")
+        database.save_recommendations(report); safe_toast("Recommendation report saved", "💾")
 
 
 def _run_data_enrichment(force_web: bool = False, selected_isin: str | None = None,
@@ -644,10 +644,11 @@ def screenshot_workflow():
                 rows = update_holding_by_isin(st.session_state.holdings.to_dict("records"), holding)
                 st.session_state.holdings = holdings_to_dataframe(rows)
                 database.save_holdings(st.session_state.holdings)
-                recompute_models(); st.toast("Confirmed holding saved to Supabase", icon="✓")
+                recompute_models(); safe_toast("Confirmed holding saved to Supabase", "💾")
 
 
 def portfolio_section():
+    render_flash_message()
     details = st.session_state.valuation_details
     total = calculate_total_value(details); invested = calculate_total_invested(details)
     profit = calculate_unrealised_pl(details)
@@ -679,7 +680,7 @@ def portfolio_section():
     if action_left.button("Refresh all prices and metadata", type="primary", use_container_width=True):
         with st.spinner("Refreshing prices, FX, identifiers, and available metadata..."):
             refresh_live_data(True); _run_data_enrichment(False)
-        st.toast("Portfolio market data refreshed", icon="✓"); st.rerun()
+        set_flash_success("Portfolio market data refreshed"); st.rerun()
     action_right.caption("Prices are estimates for research. Scalable Capital remains the final execution source.")
     dashboard()
     current_portfolio()
@@ -818,7 +819,7 @@ def _legacy_market_data_news_section():
                             sentiment.get("market_regime", "Neutral"), sentiment.get("explanation", ""))
         render_data_quality_badge(sentiment.get("confidence", "Low") + " confidence")
         if st.button("Use news in strategy refresh"):
-            _refresh_news_and_strategy(True); st.toast("Strategy refreshed using current evidence", icon="✓")
+            _refresh_news_and_strategy(True); safe_toast("Strategy refreshed using current evidence", "🧠")
     with tabs[7]:
         missing = _missing_data_frame()
         render_section_card("Missing Data Repair Center", "Repair identifiers and fund facts through the full enrichment waterfall before using a manual fallback.")
@@ -875,6 +876,7 @@ def _legacy_market_data_news_section():
 
 def market_data_news_section():
     """Readable vertical Market workspace; advanced detail lives in expanders, not tabs."""
+    render_flash_message()
     sentiment = st.session_state.sentiment
     missing = _missing_data_frame()
     engine = MarketDataEngine(st.session_state.settings.get("scraping_enabled", True),
@@ -898,16 +900,16 @@ def market_data_news_section():
     action_a, action_b, action_c, action_d = st.columns(4)
     if action_a.button("Refresh live prices", type="primary", use_container_width=True):
         with st.spinner("Refreshing prices and FX..."): refresh_live_data(True)
-        st.toast("Live prices refreshed", icon="✓"); st.rerun()
+        set_flash_success("Live prices refreshed"); st.rerun()
     if action_b.button("Enrich missing ISIN data", use_container_width=True):
         with st.spinner("Running free identifier and metadata enrichment..."): _run_data_enrichment(True)
-        st.toast("Internet enrichment completed", icon="✓"); st.rerun()
+        set_flash_success("Internet enrichment completed"); st.rerun()
     if action_c.button("Fetch market news", use_container_width=True):
         with st.spinner("Fetching public market news..."): _refresh_news_and_strategy(False)
-        st.toast("Market news refreshed", icon="✓"); st.rerun()
+        set_flash_success("Market news refreshed"); st.rerun()
     if action_d.button("Repair missing data", use_container_width=True, disabled=missing.empty):
         with st.spinner("Trying all enabled repair sources..."): _run_data_enrichment(True)
-        st.toast("Missing-data repair completed", icon="✓"); st.rerun()
+        set_flash_success("Missing-data repair completed"); st.rerun()
 
     render_section_card("1. Market Data Status", "Provider availability, key requirements, and the latest recorded provider outcome.")
     provider_cols = st.columns(4)
@@ -1017,7 +1019,7 @@ def market_data_news_section():
     with sentiment_cols[2]: render_metric_card("Confidence", sentiment.get("confidence", "Low"), tone="warning")
     render_alert(sentiment.get("explanation", "Refresh market news to produce an explanation."), "info")
     if st.button("Use current sentiment in strategy refresh"):
-        _refresh_news_and_strategy(True); st.toast("Strategy refreshed", icon="✓"); st.rerun()
+        _refresh_news_and_strategy(True); set_flash_success("Strategy refreshed"); st.rerun()
 
     render_section_card("6. Candidate Asset Research", "Edit the candidate universe first; open rankings and detailed quality only when needed.")
     with st.expander("Candidate universe editor", expanded=False): candidate_universe()
@@ -1026,6 +1028,7 @@ def market_data_news_section():
 
 
 def strategy_section():
+    render_flash_message()
     strategy = st.session_state.strategy
     render_page_header("Strategy", "Your evidence-gated investment cockpit: allocation intent, market regime, themes, and risk posture.",
                        strategy.get("confidence", "Low") + " confidence")
@@ -1063,11 +1066,11 @@ def strategy_section():
     render_section_card("Savings-plan priorities", ", ".join(strategy.get("savings_plan_priorities", [])) or "Follow underweight categories and quality scores.")
     a, b, c = st.columns(3)
     if a.button("Refresh market news and sentiment"):
-        _refresh_news_and_strategy(False); st.toast("News and sentiment refreshed", icon="✓"); st.rerun()
+        _refresh_news_and_strategy(False); set_flash_success("News and sentiment refreshed"); st.rerun()
     if b.button("Redesign strategy using latest market data", type="primary"):
         _refresh_news_and_strategy(True); st.rerun()
     if c.button("Save strategy snapshot"):
-        database.save_strategy_snapshot(strategy); st.toast("Strategy snapshot saved", icon="✓")
+        database.save_strategy_snapshot(strategy); safe_toast("Strategy snapshot saved", "💾")
     history = database.load_strategy_snapshots()
     render_section_card("Strategy history", "Saved evidence snapshots create an audit trail without changing broker positions.")
     if history.empty: render_empty_state("No strategy snapshots", "Save the current strategy when you want a durable checkpoint.")
@@ -1091,6 +1094,7 @@ def _save_current_valuation_snapshot():
 
 
 def rebalance_section():
+    render_flash_message()
     render_page_header("Rebalance", "One evidence-led superflow for prices, metadata, news, strategy, allocation, savings plans, and execution planning.",
                        "Decision support only")
     render_hero_summary("Full portfolio review", "Run full rebalance", "One guided workflow",
@@ -1148,7 +1152,7 @@ def rebalance_section():
         st.session_state.rebalance_flow_status = flow_state
         progress.empty()
         if run["warnings"]: render_alert(run["run_status"] + ": " + "; ".join(run["warnings"]), "warning")
-        else: st.toast("Full rebalance completed", icon="✓")
+        else: safe_toast("Full rebalance completed", "✅")
     render_rebalance_summary(st.session_state.recommendations)
     rebalance_engine()
     render_section_card("Execution order", "Sells first, then cash-limited buys; lower-priority actions are deferred when funding is insufficient.")
@@ -1184,6 +1188,7 @@ def _save_master_run(results):
 
 
 def settings_page():
+    render_flash_message()
     render_page_header("Settings", "Tune the experience, strategy guardrails, and Scalable assumptions without touching broker accounts.",
                        "Private configuration")
     s = st.session_state.settings
@@ -1242,7 +1247,7 @@ def settings_page():
         recompute_models()
         database.save_settings({**st.session_state.settings, "target_allocations": st.session_state.targets})
         total = sum(st.session_state.targets.values())
-        if abs(total - 100) < .01: st.toast("Settings saved", icon="✓")
+        if abs(total - 100) < .01: safe_toast("Settings saved", "💾")
         else: render_alert(f"Targets total {total:.2f}%; adjust them to 100%.", "warning")
     render_section_card("Scalable assumptions", "PRIME+ · Preferred venue EIX/gettex · Avoid Xetra unless needed · €250 direct-trade threshold · €1.98 default below-threshold round trip · Whole units for stocks/ETFs/ETCs/ETPs · Fractional crypto allowed.")
     render_alert("Final prices, availability, fees, taxes, and savings-plan changes must be checked and applied manually in Scalable Capital.", "info")
@@ -1250,10 +1255,10 @@ def settings_page():
     danger_a, danger_b, danger_c = st.columns(3)
     clear_values = danger_a.checkbox("Confirm clear valuation history")
     if danger_a.button("Clear valuation history", disabled=not clear_values):
-        database.clear_snapshots(); st.toast("Valuation history cleared", icon="✓"); st.rerun()
+        database.clear_snapshots(); set_flash_success("Valuation history cleared"); st.rerun()
     clear_recs = danger_b.checkbox("Confirm clear recommendation history")
     if danger_b.button("Clear recommendation history", disabled=not clear_recs):
-        database.clear_recommendations(); st.toast("Recommendation history cleared", icon="✓"); st.rerun()
+        database.clear_recommendations(); set_flash_success("Recommendation history cleared"); st.rerun()
     reset_demo = danger_c.checkbox("Confirm reset to sample data")
     if danger_c.button("Reset sample data", disabled=not reset_demo):
         st.session_state.holdings = holdings_to_dataframe(SAMPLE_HOLDINGS)
@@ -1261,7 +1266,7 @@ def settings_page():
         st.session_state.plans = _plans_with_categories(pd.DataFrame(SAMPLE_SAVINGS_PLANS))
         database.save_holdings(st.session_state.holdings); database.save_candidates(st.session_state.candidates)
         database.save_savings_plans(st.session_state.plans); recompute_models()
-        st.toast("Sample data restored", icon="✓"); st.rerun()
+        set_flash_success("Sample data restored"); st.rerun()
 
 
 user_id = require_authentication()
