@@ -8,8 +8,11 @@ from typing import Any
 
 TTL_SECONDS = {
     "price": 15 * 60,
+    "history": 12 * 60 * 60,
     "fx": 12 * 60 * 60,
     "metadata": 7 * 24 * 60 * 60,
+    "etf_profile": 7 * 24 * 60 * 60,
+    "symbol_search": 7 * 24 * 60 * 60,
     "ter": 30 * 24 * 60 * 60,
     "factsheet": 30 * 24 * 60 * 60,
     "news": 60 * 60,
@@ -64,4 +67,3 @@ class SupabaseDataCache:
             "data_kind": data_kind, "payload": payload, "fetched_at": now.isoformat(),
             "expires_at": (now + timedelta(seconds=ttl)).isoformat(),
         }, on_conflict="user_id,cache_key")
-

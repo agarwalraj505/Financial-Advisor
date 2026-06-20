@@ -64,6 +64,12 @@ inject_premium_css()
 HOLDING_DISPLAY = {"instrument": "Instrument", "isin": "ISIN", "ticker_id": "Ticker/ID",
     "price_symbol": "Price Symbol", "asset_type": "Asset type", "category": "Category", "quantity": "Quantity",
     "resolved_price_symbol": "Resolved market symbol",
+    "alpha_vantage_symbol": "Alpha Vantage symbol",
+    "alpha_vantage_last_price": "Alpha Vantage last price",
+    "alpha_vantage_previous_close": "Alpha Vantage previous close",
+    "alpha_vantage_currency": "Alpha Vantage currency",
+    "alpha_vantage_last_updated": "Alpha Vantage last updated",
+    "alpha_vantage_confidence": "Alpha Vantage confidence",
     "theme": "Theme", "region": "Region",
     "manual_current_price": "Manual current price", "live_current_price": "Live current price",
     "price_source": "Price source", "currency": "Currency", "fx_rate_to_eur": "FX rate to EUR",
@@ -79,8 +85,9 @@ SCORE_COLUMNS = ["Quality Score", "Momentum Score", "Cost Score", "Portfolio Fit
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def cached_quote(symbol: str, bucket: int):
-    return get_market_quote(symbol)
+def cached_quote(symbol: str, bucket: int, alpha_vantage_symbol: str = "",
+                 alpha_vantage_currency: str = ""):
+    return get_market_quote(symbol, alpha_vantage_symbol, alpha_vantage_currency)
 
 
 @st.cache_data(ttl=43200, show_spinner=False)
@@ -122,7 +129,8 @@ def _normalise_candidates(frame: pd.DataFrame) -> pd.DataFrame:
     frame = frame.copy()
     numeric = ["ter_pct", "fund_size_eur", "manual_spread_estimate_pct", "liquidity_score",
                "quality_score", "momentum_score", "valuation_score", "cost_score",
-               "portfolio_fit_score", "risk_control_score", "total_score"]
+               "portfolio_fit_score", "risk_control_score", "total_score",
+               "alpha_vantage_last_price", "alpha_vantage_previous_close"]
     booleans = ["savings_plan_available", "direct_trading_available", "fractional_allowed", "scalable_compatible",
                 "valuation_ready", "recommendation_ready", "confirmed_by_user", "manual_review_attempted"]
     json_columns = ["provider_status", "enrichment_audit", "web_scrape_sources", "metadata_conflicts",
@@ -192,7 +200,10 @@ def initialise_state(database: Database):
                         symbol=symbol, latest_price=payload.get("latest_price"),
                         previous_close=payload.get("previous_close"), currency=payload.get("currency", ""),
                         fetched_at=fetched_at, histories={},
-                        stale=bool(expires_at <= utc_now()) if expires_at else is_stale(fetched_at, "price"))
+                        stale=bool(expires_at <= utc_now()) if expires_at else is_stale(fetched_at, "price"),
+                        provider=payload.get("provider") or row.get("provider", ""),
+                        confidence=payload.get("confidence", ""),
+                        provider_symbol=payload.get("provider_symbol", ""))
                     if fetched_at: cached_fetches.append(str(fetched_at))
             elif row.get("data_kind") == "fx" and key.startswith("fx:"):
                 currency = key.removeprefix("fx:")
@@ -297,20 +308,27 @@ def refresh_live_data(force=False):
         cached_fx.clear()
     interval = max(30, int(st.session_state.settings["refresh_interval"]))
     bucket = int(time.time() // interval)
-    symbols = set()
+    symbol_inputs = {}
     for frame in (st.session_state.holdings, st.session_state.candidates):
         for _, asset in frame.iterrows():
-            symbol = str(asset.get("resolved_price_symbol") or asset.get("price_symbol") or "").strip()
-            if symbol: symbols.add(symbol)
+            alpha_symbol = str(asset.get("alpha_vantage_symbol") or "").strip()
+            symbol = str(asset.get("resolved_price_symbol") or asset.get("price_symbol") or alpha_symbol).strip()
+            if symbol:
+                symbol_inputs.setdefault(symbol, {
+                    "alpha_symbol": alpha_symbol,
+                    "alpha_currency": str(asset.get("alpha_vantage_currency") or "").strip(),
+                })
     cooling_down = fresh_bad_symbols(st.session_state.get("symbol_resolution_cache", []))
     quick_retry = RetryQueue()
     quick_retry.memory = list(st.session_state.get("provider_failures", []))
     initial_quick_failures = len(quick_retry.memory)
-    symbols = sorted(symbol for symbol in symbols
+    symbols = sorted(symbol for symbol in symbol_inputs
                      if symbol and symbol.lower() != "nan" and symbol not in cooling_down
                      and quick_retry.can_retry("Quick price", symbol))
     with ThreadPoolExecutor(max_workers=4) as executor:
-        quotes = dict(zip(symbols, executor.map(lambda symbol: cached_quote(symbol, bucket), symbols)))
+        quotes = dict(zip(symbols, executor.map(
+            lambda symbol: cached_quote(symbol, bucket, symbol_inputs[symbol]["alpha_symbol"],
+                                        symbol_inputs[symbol]["alpha_currency"]), symbols)))
     currencies = {quote.currency for quote in quotes.values() if quote.currency}
     fx_rates = {"EUR": 1.0}
     pending_currencies = sorted(currencies - {"EUR"})
@@ -329,8 +347,11 @@ def refresh_live_data(force=False):
             if quote.is_available:
                 cache.set(f"price:{symbol}", {"latest_price": quote.latest_price,
                           "previous_close": quote.previous_close, "currency": quote.currency,
-                          "fetched_at": quote.fetched_at}, "yfinance", "price")
-        for currency, rate in fx_rates.items(): cache.set(f"fx:{currency}", {"rate": rate}, "ECB/yfinance", "fx")
+                          "fetched_at": quote.fetched_at, "provider": quote.provider,
+                          "confidence": quote.confidence, "provider_symbol": quote.provider_symbol},
+                          quote.provider or "Market Data Engine", "price")
+        for currency, rate in fx_rates.items():
+            cache.set(f"fx:{currency}", {"rate": rate}, "ECB/Alpha Vantage/yfinance", "fx")
         database.save_holdings(st.session_state.holdings)
     except (AttributeError, SupabaseConnectionError):
         pass  # Cache schema may not be installed yet; valuation remains usable in session.
@@ -469,13 +490,16 @@ def current_portfolio():
         else "● Stale live price" if stale and "live" in value.lower()
         else "● Scalable screenshot" if "scalable" in value.lower()
         else "● Manual fallback" if "manual" in value.lower()
-        else "● Missing" if "missing" in value.lower() else "● Live market data"
+        else "● Missing" if "missing" in value.lower() else f"● {value or 'Live market data'}"
         for value, stale in zip(source, stale_flags)]
     valuation_ready = existing.get("valuation_ready", pd.Series(False, index=existing.index)).fillna(False)
     recommendation_ready = existing.get("recommendation_ready", pd.Series(False, index=existing.index)).fillna(False)
     display["Readiness"] = ["● Recommendation ready" if rec else "● Valuation ready" if val else "● Review required"
                             for val, rec in zip(valuation_ready, recommendation_ready)]
-    disabled_columns = [column for column in ["Live current price", "Price source", "Current value EUR", "P/L EUR", "P/L %", "Data quality", "Readiness"] if column in display]
+    disabled_columns = [column for column in ["Live current price", "Price source", "Current value EUR", "P/L EUR", "P/L %",
+                        "Alpha Vantage last price", "Alpha Vantage previous close", "Alpha Vantage currency",
+                        "Alpha Vantage last updated", "Alpha Vantage confidence", "Data quality", "Readiness"]
+                        if column in display]
     edited = st.data_editor(display, num_rows="dynamic", width="stretch", hide_index=True,
         disabled=disabled_columns,
         column_config={"Category": st.column_config.SelectboxColumn(options=SUPPORTED_CATEGORIES)}, key="current_editor")
@@ -513,7 +537,10 @@ def candidate_universe():
                 "recommendation_review_reasons"}
     editor_columns = [column for column in CANDIDATE_COLUMNS if column not in advanced]
     display = editable[editor_columns].rename(columns=CANDIDATE_DISPLAY)
-    edited = st.data_editor(display, num_rows="dynamic", width="stretch", hide_index=True, disabled=SCORE_COLUMNS,
+    provider_columns = ["Alpha Vantage Last Price", "Alpha Vantage Previous Close",
+                        "Alpha Vantage Currency", "Alpha Vantage Last Updated", "Alpha Vantage Confidence"]
+    edited = st.data_editor(display, num_rows="dynamic", width="stretch", hide_index=True,
+        disabled=SCORE_COLUMNS + [column for column in provider_columns if column in display],
         column_config={"Category": st.column_config.SelectboxColumn(options=SUPPORTED_CATEGORIES),
                        "Source URL": st.column_config.LinkColumn()}, key="candidate_editor")
     edited_internal = edited.rename(columns={v: k for k, v in CANDIDATE_DISPLAY.items()})
@@ -937,7 +964,7 @@ def portfolio_section():
                                       "positive" if profit >= 0 else "negative")
     with cards[5]: render_metric_card("Cash", f"€{cash:,.0f}", f"{cash / total * 100:.1f}%" if total else "—")
     non_cash = details[details["category"] != "Cash"]
-    live_count = int((non_cash["price_source"] == "Live market data").sum())
+    live_count = int((~non_cash["price_source"].isin(["Manual fallback", "Scalable screenshot", "Missing", ""])).sum())
     fallback_count = int(non_cash["price_source"].isin(["Manual fallback", "Scalable screenshot"]).sum())
     with cards[6]: render_metric_card("Data quality", f"{live_count}/{len(non_cash)} live",
                                       f"{fallback_count} confirmed fallback", "warning" if fallback_count else "positive")
@@ -1049,6 +1076,14 @@ def market_data_news_section():
 
     render_section_card("2. Data Coverage", "Coverage is calculated from cached holdings and candidates; it does not trigger network requests.")
     render_metric_card("Total assets", int(coverage.get("total_assets", 0)), "Holdings and candidates")
+    alpha_assets = pd.concat([st.session_state.scored_current, st.session_state.scored_candidates],
+                             ignore_index=True, sort=False)
+    alpha_successes = int((alpha_assets.get("data_source", pd.Series(dtype=str)).astype(str) == "Alpha Vantage").sum())
+    alpha_failures = sum(str(item.get("provider", "")) == "Alpha Vantage"
+                         for item in st.session_state.get("provider_failures", []))
+    alpha_cols = st.columns(2)
+    with alpha_cols[0]: render_metric_card("Alpha Vantage successes", alpha_successes, "Cached asset records", "positive" if alpha_successes else "neutral")
+    with alpha_cols[1]: render_metric_card("Alpha Vantage failures", alpha_failures, "Stored retry/audit records", "warning" if alpha_failures else "positive")
     coverage_items = [("Price", "price_coverage"), ("Symbol", "symbol_coverage"),
                       ("Metadata", "metadata_coverage"), ("TER/cost", "ter_coverage"),
                       ("FX", "fx_coverage"), ("Factsheet", "factsheet_coverage"), ("News", "news_coverage"),
@@ -1415,13 +1450,14 @@ def settings_page():
         except Exception:
             return "Not configured"
     required = ["SUPABASE_URL", "SUPABASE_ANON_KEY", "APP_PASSWORD"]
-    optional = ["OPENFIGI_API_KEY", "COINGECKO_API_KEY", "FMP_API_KEY", "TWELVE_DATA_API_KEY"]
+    optional = ["ALPHA_VANTAGE_API_KEY", "OPENFIGI_API_KEY", "COINGECKO_API_KEY",
+                "FMP_API_KEY", "TWELVE_DATA_API_KEY"]
     with st.expander("Secrets status"):
         safe_dataframe(pd.DataFrame(
             [{"Secret": name, "Required": "Yes", "Status": secret_status(name)} for name in required] +
             [{"Secret": name, "Required": "No", "Status": secret_status(name)} for name in optional]),
             width="stretch", hide_index=True)
-    render_section_card("Data providers", "Free sources lead the waterfall; paid-key adapters remain optional.")
+    render_section_card("Data providers", "Alpha Vantage is used when configured; existing free fallbacks remain available.")
     provider_rows = get_provider_registry()
     safe_dataframe(pd.DataFrame(provider_rows), width="stretch", hide_index=True)
     render_section_card("Strategy settings", "Long-term allocation and risk guardrails used by the optimizer.")

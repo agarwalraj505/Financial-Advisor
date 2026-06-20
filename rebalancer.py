@@ -12,7 +12,10 @@ from pydantic import BaseModel, Field
 MIN_EFFICIENT_ORDER_EUR = 250.0
 MATERIAL_DRIFT_PCT = 3.0
 ON_TARGET_DRIFT_PCT = 1.0
-HOLDING_COLUMNS = ["instrument", "isin", "ticker_id", "price_symbol", "asset_type", "category", "theme", "region", "quantity",
+HOLDING_COLUMNS = ["instrument", "isin", "ticker_id", "price_symbol", "alpha_vantage_symbol",
+                   "alpha_vantage_last_price", "alpha_vantage_previous_close", "alpha_vantage_currency",
+                   "alpha_vantage_last_updated", "alpha_vantage_confidence",
+                   "asset_type", "category", "theme", "region", "quantity",
                    "manual_current_price", "live_current_price", "price_source", "currency", "fx_rate_to_eur",
                    "current_value_eur", "buy_in_value_eur", "pl_eur", "pl_pct",
                    "direct_trading_allowed", "fractional_allowed", "notes", "wkn", "current_price_eur",
@@ -94,7 +97,10 @@ def _normalise_holdings(data: pd.DataFrame) -> pd.DataFrame:
                      "pl_percent": 0.0, "previous_close": 0.0, "daily_gain_eur": 0.0,
                      "daily_gain_pct": 0.0, "daily_gain_percent": 0.0, "price_error": "",
                      "resolved_price_symbol": "", "data_source": "", "source_url": "",
-                     "data_confidence": "", "exchange": ""})
+                "data_confidence": "", "exchange": "", "alpha_vantage_symbol": "",
+                "alpha_vantage_last_price": 0.0, "alpha_vantage_previous_close": 0.0,
+                "alpha_vantage_currency": "", "alpha_vantage_last_updated": "",
+                "alpha_vantage_confidence": ""})
     for column, default in defaults.items():
         if column not in frame:
             frame[column] = ([deepcopy(default) for _ in range(len(frame))]
@@ -107,6 +113,8 @@ def _normalise_holdings(data: pd.DataFrame) -> pd.DataFrame:
                       "replication_method", "distribution_policy", "domicile", "last_updated"]
     string_columns += ["fx_source", "price_error"]
     string_columns += ["resolved_price_symbol", "data_source", "source_url", "data_confidence", "exchange"]
+    string_columns += ["alpha_vantage_symbol", "alpha_vantage_currency",
+                       "alpha_vantage_last_updated", "alpha_vantage_confidence"]
     for column in string_columns:
         frame[column] = frame[column].fillna("").astype(str)
     frame["currency"] = frame["currency"].replace("", "EUR")
@@ -121,7 +129,8 @@ def _normalise_holdings(data: pd.DataFrame) -> pd.DataFrame:
                    "buy_in_price_eur", "sell_price_eur", "buy_price_eur", "spread_eur", "spread_percent"]:
         frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
     for column in ["selected_price", "pl_percent", "previous_close", "daily_gain_eur",
-                   "daily_gain_pct", "daily_gain_percent"]:
+                   "daily_gain_pct", "daily_gain_percent", "alpha_vantage_last_price",
+                   "alpha_vantage_previous_close"]:
         frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
     for column in ["ter_pct", "fund_size_eur", "manual_spread_estimate_pct"]:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")

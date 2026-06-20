@@ -7,7 +7,10 @@ SUPPORTED_CATEGORIES = ["Core", "EM", "India", "Growth", "AI", "Semiconductors",
 TARGET_ALLOCATIONS = {"Core": 25.0, "EM": 15.0, "Growth": 40.0, "Defence": 5.0,
                       "Commodities": 10.0, "Crypto": 5.0, "Cash": 0.0}
 
-CANDIDATE_COLUMNS = ["instrument", "isin", "wkn", "ticker_id", "price_symbol", "resolved_price_symbol", "exchange", "asset_type", "category",
+CANDIDATE_COLUMNS = ["instrument", "isin", "wkn", "ticker_id", "price_symbol", "resolved_price_symbol",
+    "alpha_vantage_symbol", "alpha_vantage_last_price", "alpha_vantage_previous_close",
+    "alpha_vantage_currency", "alpha_vantage_last_updated", "alpha_vantage_confidence",
+    "exchange", "asset_type", "category",
     "theme", "region", "currency", "ter_pct", "fund_size_eur", "replication_method",
     "distribution_policy", "domicile", "savings_plan_available", "direct_trading_available",
     "fractional_allowed", "scalable_compatible", "preferred_venue", "manual_spread_estimate_pct",

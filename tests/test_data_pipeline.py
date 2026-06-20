@@ -25,6 +25,7 @@ def test_provider_registry_needs_no_paid_keys(monkeypatch):
     monkeypatch.setattr("provider_registry.read_secret", lambda *args: "")
     rows = {row["Provider"]: row for row in get_provider_registry()}
     assert rows["yfinance"]["Status"] == "Enabled"
+    assert rows["Alpha Vantage"]["Status"] == "Disabled"
     assert rows["OpenFIGI"]["Status"] == "Enabled"
     assert rows["FMP"]["Status"] == "Disabled"
     assert rows["Twelve Data"]["Status"] == "Disabled"

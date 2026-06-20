@@ -84,8 +84,18 @@ ENRICHMENT_MAP = {"valuation_ready": "valuation_ready", "recommendation_ready": 
     "confirmed_by_user": "confirmed_by_user", "suggested_price_symbols": "suggested_price_symbols",
     "suggested_asset_type": "suggested_asset_type", "suggested_category": "suggested_category",
     "manual_review_attempted": "manual_review_attempted", "last_auto_repair_at": "last_auto_repair_at"}
+ALPHA_VANTAGE_MAP = {
+    "alpha_vantage_symbol": "alpha_vantage_symbol",
+    "alpha_vantage_last_price": "alpha_vantage_last_price",
+    "alpha_vantage_previous_close": "alpha_vantage_previous_close",
+    "alpha_vantage_currency": "alpha_vantage_currency",
+    "alpha_vantage_last_updated": "alpha_vantage_last_updated",
+    "alpha_vantage_confidence": "alpha_vantage_confidence",
+}
 HOLDING_MAP.update(ENRICHMENT_MAP)
 CANDIDATE_MAP.update(ENRICHMENT_MAP)
+HOLDING_MAP.update(ALPHA_VANTAGE_MAP)
+CANDIDATE_MAP.update(ALPHA_VANTAGE_MAP)
 
 SAVINGS_MAP = {"instrument": "instrument", "isin": "isin", "category": "category",
                "current_plan": "current_plan_eur", "new_plan": "new_plan_eur", "action": "action",

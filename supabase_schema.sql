@@ -207,7 +207,28 @@ alter table public.symbol_resolution_cache
   add column if not exists confidence text,
   add column if not exists source text,
   add column if not exists last_tested timestamptz,
-  add column if not exists error text;
+  add column if not exists error text,
+  add column if not exists alpha_vantage_symbol text,
+  add column if not exists alpha_vantage_candidates jsonb,
+  add column if not exists alpha_vantage_error text,
+  add column if not exists alpha_vantage_symbol_confidence text,
+  add column if not exists alpha_vantage_last_tested timestamptz;
+
+alter table public.holdings
+  add column if not exists alpha_vantage_symbol text,
+  add column if not exists alpha_vantage_last_price numeric,
+  add column if not exists alpha_vantage_previous_close numeric,
+  add column if not exists alpha_vantage_currency text,
+  add column if not exists alpha_vantage_last_updated timestamptz,
+  add column if not exists alpha_vantage_confidence text;
+
+alter table public.candidate_assets
+  add column if not exists alpha_vantage_symbol text,
+  add column if not exists alpha_vantage_last_price numeric,
+  add column if not exists alpha_vantage_previous_close numeric,
+  add column if not exists alpha_vantage_currency text,
+  add column if not exists alpha_vantage_last_updated timestamptz,
+  add column if not exists alpha_vantage_confidence text;
 
 alter table public.data_source_audit
   add column if not exists source_url text,

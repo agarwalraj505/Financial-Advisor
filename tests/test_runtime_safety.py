@@ -13,6 +13,7 @@ from providers.yfinance_provider import YFinanceProvider
 @pytest.mark.parametrize("module", [
     "market_data", "market_data_engine", "strategy_engine", "master_rebalance",
     "web_scraper", "symbol_resolver", "providers.base", "providers.yfinance_provider",
+    "providers.alpha_vantage_provider",
     "providers.openfigi_provider", "providers.ecb_provider", "providers.coingecko_provider",
     "providers.stooq_provider", "providers.web_price_provider",
 ])
@@ -24,6 +25,7 @@ def test_market_data_engine_initializes_without_optional_keys(monkeypatch):
     monkeypatch.setattr("providers.base.read_secret", lambda *args: "")
     engine = MarketDataEngine(scraping_enabled=False)
     statuses = {row["Provider"]: row["Status"] for row in engine.provider_status_rows()}
+    assert statuses["Alpha Vantage"] == "Disabled"
     assert statuses["yfinance"] == "Enabled"
     assert statuses["FMP"] == "Disabled"
     assert statuses["Twelve Data"] == "Disabled"

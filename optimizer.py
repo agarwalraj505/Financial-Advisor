@@ -30,20 +30,26 @@ def _fee_issue(value: float, minimum: float, fee: float) -> str:
 def _row(action: str, purpose: str, asset: pd.Series, quantity: float, value: float,
          reason: str, settings: dict) -> dict:
     fractional = bool(asset.get("fractional_allowed", False))
+    price_source = asset.get("price_source") or asset.get("data_source") or "Manual fallback after failed enrichment"
+    execution_warning = (
+        "Alpha Vantage quote may be end-of-day. Check live Scalable price before execution."
+        if str(price_source) == "Alpha Vantage"
+        else "Check live Scalable price before execution"
+    )
     return {"Action": action, "Purpose": purpose, "Instrument": asset.get("instrument", ""),
             "ISIN": asset.get("isin", ""), "Ticker/ID": asset.get("ticker_id", ""),
             "Quantity": round(quantity, 6) if fractional else int(quantity), "Est. value": round(value, 2),
             "Fee issue": _fee_issue(value, settings["direct_trade_minimum"], settings["small_trade_round_trip_fee"]),
             "Score": round(_number(asset.get("total_score")), 2),
             "Data confidence": asset.get("data_confidence", "Low"), "Reason": reason,
-            "Price source": asset.get("price_source") or asset.get("data_source") or "Manual fallback after failed enrichment",
+            "Price source": price_source,
             "Metadata source": asset.get("source_url") or asset.get("issuer") or asset.get("data_source") or "Pending confirmation",
             "News/sentiment input": settings.get("news_sentiment", "Neutral / no material evidence"),
             "Last updated": asset.get("last_updated") or datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "Scalable execution warning": "Check live Scalable price before execution",
+            "Scalable execution warning": execution_warning,
             "Data source": asset.get("data_source") or "Manual fallback after failed enrichment",
             "Timestamp": asset.get("last_updated") or datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "Execution note": "Check live Scalable price before execution"}
+            "Execution note": execution_warning}
 
 
 def generate_market_aware_recommendations(current: pd.DataFrame, candidates: pd.DataFrame,

@@ -41,12 +41,13 @@ def select_position_price(row: dict, quote: MarketQuote | None = None) -> tuple[
     """Choose one explainable price without mutating entered screenshot values."""
     stale_live_available = bool(quote and quote.is_available and quote.stale)
     if quote and quote.is_available and not quote.stale:
-        return float(quote.latest_price), PRICE_SOURCE_LIVE, False
+        return float(quote.latest_price), quote.provider or PRICE_SOURCE_LIVE, False
     cached_live = _number(row.get("live_current_price"))
     cached_stale = cached_live > 0 and is_stale(row.get("last_updated"), "price")
     stale_live_available = stale_live_available or cached_stale
     if cached_live > 0 and not cached_stale:
-        return cached_live, PRICE_SOURCE_LIVE, False
+        source = str(row.get("price_source", "") or "")
+        return cached_live, source if source not in {"", PRICE_SOURCE_MISSING, PRICE_SOURCE_MANUAL} else PRICE_SOURCE_LIVE, False
     screenshot = _number(row.get("current_price_eur"))
     screenshot_evidence = any((row.get("screenshot_path"), row.get("screenshot_captured_at"),
                                str(row.get("source", "")).lower().startswith("scalable"),
@@ -120,7 +121,8 @@ def valuate_holdings(
     rows = []
     for _, holding in frame.iterrows():
         row = holding.to_dict()
-        symbol = str(row.get("resolved_price_symbol") or row.get("price_symbol") or "").strip()
+        symbol = str(row.get("resolved_price_symbol") or row.get("price_symbol") or
+                     row.get("alpha_vantage_symbol") or "").strip()
         quantity = _number(row.get("quantity"))
         quote = quotes.get(symbol)
         currency = normalise_currency(quote.currency if quote and quote.currency else row.get("currency", "") or "EUR")
@@ -148,6 +150,17 @@ def valuate_holdings(
                     "daily_gain_pct": round((price / previous - 1) * 100, 2) if previous else 0.0,
                     "daily_gain_percent": round((price / previous - 1) * 100, 2) if previous else 0.0,
                     "price_error": "; ".join(dict.fromkeys(errors))})
+        if quote and quote.is_available and quote.provider:
+            row.update({"data_source": quote.provider,
+                        "data_confidence": quote.confidence or row.get("data_confidence", ""),
+                        "last_updated": quote.fetched_at or row.get("last_updated", "")})
+        if quote and quote.is_available and quote.provider == "Alpha Vantage":
+            row.update({"alpha_vantage_symbol": quote.provider_symbol or row.get("alpha_vantage_symbol", "") or symbol,
+                        "alpha_vantage_last_price": quote.latest_price,
+                        "alpha_vantage_previous_close": quote.previous_close,
+                        "alpha_vantage_currency": currency,
+                        "alpha_vantage_last_updated": quote.fetched_at,
+                        "alpha_vantage_confidence": quote.confidence or "High"})
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -160,7 +173,8 @@ def portfolio_market_history(holdings: pd.DataFrame, quotes: dict[str, MarketQuo
         if str(row.get("category", "")) == "Cash":
             static_value += float(row.get("current_value_eur", 0) or 0)
             continue
-        symbol = str(row.get("resolved_price_symbol") or row.get("price_symbol") or "")
+        symbol = str(row.get("resolved_price_symbol") or row.get("price_symbol") or
+                     row.get("alpha_vantage_symbol") or "")
         quote = quotes.get(symbol)
         history = quote.histories.get("1y") if quote else None
         if history is None or history.empty or "Close" not in history:

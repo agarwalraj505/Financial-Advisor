@@ -32,6 +32,9 @@ class MarketQuote:
     histories: dict[str, pd.DataFrame] = field(default_factory=dict)
     error: str = ""
     stale: bool = False
+    provider: str = ""
+    confidence: str = ""
+    provider_symbol: str = ""
 
     @property
     def is_available(self) -> bool:
@@ -47,15 +50,22 @@ def _quote_from_payload(payload: dict) -> MarketQuote:
                        previous_close=payload.get("previous_close"),
                        currency=normalise_currency(payload.get("currency", "")),
                        fetched_at=str(payload.get("fetched_at", "")),
-                       histories=payload.get("histories") or {}, error=str(payload.get("error", "")))
+                       histories=payload.get("histories") or {}, error=str(payload.get("error", "")),
+                       provider=str(payload.get("provider", "")), confidence=str(payload.get("confidence", "")),
+                       provider_symbol=str(payload.get("provider_symbol", "")))
 
 
-def fetch_market_quote(symbol: str) -> MarketQuote:
-    return _quote_from_payload(_engine().quick_quote(symbol))
+def fetch_market_quote(symbol: str, alpha_vantage_symbol: str = "",
+                       alpha_vantage_currency: str = "") -> MarketQuote:
+    engine = _engine()
+    payload = (engine.quick_quote(symbol, alpha_vantage_symbol, alpha_vantage_currency)
+               if alpha_vantage_symbol else engine.quick_quote(symbol))
+    return _quote_from_payload(payload)
 
 
-def get_market_quote(symbol: str) -> MarketQuote:
-    return fetch_market_quote(symbol)
+def get_market_quote(symbol: str, alpha_vantage_symbol: str = "",
+                     alpha_vantage_currency: str = "") -> MarketQuote:
+    return fetch_market_quote(symbol, alpha_vantage_symbol, alpha_vantage_currency)
 
 
 def fetch_fx_rate_to_eur(currency: str) -> tuple[float | None, str]:

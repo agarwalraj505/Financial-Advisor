@@ -22,9 +22,13 @@ def test_holding_payload_maps_app_columns_and_removes_nan():
 def test_candidate_payload_uses_database_column_names():
     payload = candidate_to_payload({"instrument": "Fund", "ter_pct": .2,
                                     "manual_spread_estimate_pct": .1,
+                                    "alpha_vantage_symbol": "FUND.DEX",
+                                    "alpha_vantage_last_price": 25.5,
                                     "last_updated": ""}, "user-1")
     assert payload["ter_percent"] == .2
     assert payload["manual_spread_estimate_percent"] == .1
+    assert payload["alpha_vantage_symbol"] == "FUND.DEX"
+    assert payload["alpha_vantage_last_price"] == 25.5
     assert payload["last_updated"] is None
 
 

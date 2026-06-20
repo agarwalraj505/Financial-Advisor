@@ -14,9 +14,10 @@ class ECBProvider(BaseProvider):
     name = "ECB"
     purpose = "FX rates"
 
-    def __init__(self, yahoo_provider=None):
+    def __init__(self, yahoo_provider=None, alpha_vantage_provider=None):
         super().__init__()
         self.yahoo = yahoo_provider
+        self.alpha = alpha_vantage_provider
 
     def get_rate_to_eur(self, currency: str) -> ProviderResult:
         raw_currency = str(currency or "")
@@ -39,6 +40,14 @@ class ECBProvider(BaseProvider):
                 return self.success({"currency": currency, "fx_rate_to_eur": rate}, "High")
         except Exception as exc:
             self.last_error = f"ECB failed: {exc}"
+        if self.alpha and self.alpha.is_enabled():
+            pair_currency = "GBP" if currency == "GBX" else currency
+            fallback = self.alpha.get_fx_rate(pair_currency, "EUR")
+            if fallback.success and fallback.data.get("rate"):
+                rate = float(fallback.data["rate"])
+                if currency == "GBX": rate /= 100.0
+                return self.success({"currency": currency, "fx_rate_to_eur": rate,
+                                     "fallback_provider": "Alpha Vantage"}, "Medium")
         if self.yahoo:
             pair_currency = "GBP" if currency == "GBX" else currency
             fallback = self.yahoo.get_price(f"EUR{pair_currency}=X")
@@ -47,4 +56,4 @@ class ECBProvider(BaseProvider):
                 if currency == "GBX": rate /= 100.0
                 return self.success({"currency": currency, "fx_rate_to_eur": rate,
                                      "fallback_provider": "yfinance"}, "Medium")
-        return self.failure("ECB and yfinance FX failed; FX manual review required")
+        return self.failure("ECB, Alpha Vantage, and yfinance FX failed; FX manual review required")

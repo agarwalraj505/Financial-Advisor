@@ -10,7 +10,7 @@ import pandas as pd
 from asset_quality import assess_asset_readiness
 from enrichment_audit import audit_event
 from metadata_enrichment import merge_provider_data, suggested_symbol_candidates
-from providers import (CoinGeckoProvider, ECBProvider, FMPProvider, OpenFIGIProvider,
+from providers import (AlphaVantageProvider, CoinGeckoProvider, ECBProvider, FMPProvider, OpenFIGIProvider,
                        StooqProvider, TwelveDataProvider, WebPriceProvider, YFinanceProvider)
 from symbol_resolver import SymbolResolver
 from web_scraper import scrape_asset_metadata
@@ -21,18 +21,18 @@ CRYPTO_SYMBOLS = {"bitcoin": "BTC-EUR", "ethereum": "ETH-EUR", "solana": "SOL-EU
 class MarketDataEngine:
     def __init__(self, scraping_enabled: bool = True, rate_limit_seconds: float = .25,
                  retry_queue=None, event_sink=None):
-        self.yahoo = YFinanceProvider(); self.openfigi = OpenFIGIProvider()
-        self.ecb = ECBProvider(self.yahoo); self.coingecko = CoinGeckoProvider()
+        self.yahoo = YFinanceProvider(); self.alpha = AlphaVantageProvider(); self.openfigi = OpenFIGIProvider()
+        self.ecb = ECBProvider(self.yahoo, self.alpha); self.coingecko = CoinGeckoProvider()
         self.fmp = FMPProvider(); self.twelve = TwelveDataProvider()
         self.stooq = StooqProvider(); self.web_price = WebPriceProvider()
-        self.symbol_resolver = SymbolResolver(yahoo=self.yahoo, stooq=self.stooq)
+        self.symbol_resolver = SymbolResolver(yahoo=self.yahoo, stooq=self.stooq, alpha=self.alpha)
         self.retry_queue = retry_queue; self.event_sink = event_sink
         self.scraping_enabled = scraping_enabled
         self.rate_limit_seconds = max(0, float(rate_limit_seconds))
         self.audit: list[dict] = []; self.warnings: list[str] = []
 
     def provider_status_rows(self, news_enabled: bool = True) -> list[dict]:
-        rows = [self.yahoo.status_row("No"),
+        rows = [self.alpha.status_row("Yes"), self.yahoo.status_row("No"),
                 self.openfigi.status_row("No, optional key for higher limits"), self.ecb.status_row("No"),
                 self.stooq.status_row("No"), self.web_price.status_row("No"),
                 self.coingecko.status_row("Optional"), self.fmp.status_row("Optional key"),
@@ -49,13 +49,44 @@ class MarketDataEngine:
             return pd.Series(dtype=float)
         return pd.to_numeric(history["Close"], errors="coerce").dropna()
 
-    def quick_quote(self, symbol: str) -> dict:
+    def quick_quote(self, symbol: str, alpha_vantage_symbol: str = "",
+                    alpha_vantage_currency: str = "") -> dict:
         """Fast price/history waterfall used only by explicit refresh actions."""
         symbol = str(symbol or "").strip()
         if not symbol:
             return {"symbol": "", "latest_price": None, "previous_close": None, "currency": "",
                     "histories": {}, "provider": "", "fetched_at": "", "error": "Missing price symbol"}
         errors = []
+        alpha_symbol = str(alpha_vantage_symbol or "").strip()
+        if not alpha_symbol and self.alpha.is_enabled() and "." not in symbol:
+            alpha_symbol = symbol
+        if self.alpha.is_enabled() and alpha_symbol:
+            alpha_price = self.alpha.get_price(alpha_symbol)
+            if alpha_price.success:
+                alpha_history = alpha_price.data.get("history")
+                if not isinstance(alpha_history, pd.DataFrame) or alpha_history.empty:
+                    daily = self.alpha.get_daily_series(alpha_symbol)
+                    alpha_history = daily.data.get("history", pd.DataFrame()) if daily.success else pd.DataFrame()
+                    if not daily.success and daily.error:
+                        errors.append(daily.error)
+                closes = self._close_values(alpha_history)
+                previous = alpha_price.data.get("previous_close")
+                if previous is None and len(closes) >= 2:
+                    previous = float(closes.iloc[-2])
+                histories = {
+                    "5d": alpha_history.tail(5),
+                    "1mo": alpha_history.tail(23),
+                    "1y": alpha_history,
+                } if isinstance(alpha_history, pd.DataFrame) and not alpha_history.empty else {}
+                return {"symbol": symbol, "provider_symbol": alpha_symbol,
+                        "latest_price": float(alpha_price.data["price"]),
+                        "previous_close": previous,
+                        "currency": alpha_price.data.get("currency") or alpha_vantage_currency,
+                        "histories": histories, "provider": self.alpha.name,
+                        "confidence": alpha_price.confidence,
+                        "fetched_at": alpha_price.fetched_at, "error": ""}
+            if alpha_price.error:
+                errors.append(alpha_price.error)
         price = self.yahoo.get_price(symbol)
         recent = self.yahoo.get_history(symbol, "5d") if price.success else self.yahoo.failure("Price unavailable")
         if price.success and recent.success:
@@ -68,6 +99,7 @@ class MarketDataEngine:
             return {"symbol": symbol, "latest_price": float(price.data["price"]),
                     "previous_close": previous, "currency": price.data.get("currency", ""),
                     "histories": histories, "provider": self.yahoo.name,
+                    "confidence": price.confidence,
                     "fetched_at": price.fetched_at, "error": ""}
         errors.extend(item for item in (price.error, recent.error) if item)
         stooq = self.stooq.get_price(symbol)
@@ -78,7 +110,8 @@ class MarketDataEngine:
                     "previous_close": float(closes.iloc[-2]) if len(closes) >= 2 else None,
                     "currency": stooq.data.get("currency", ""),
                     "histories": {"5d": history, "1mo": history, "1y": history},
-                    "provider": self.stooq.name, "fetched_at": stooq.fetched_at, "error": ""}
+                    "provider": self.stooq.name, "confidence": stooq.confidence,
+                    "fetched_at": stooq.fetched_at, "error": ""}
         if stooq.error: errors.append(stooq.error)
         lower = symbol.lower()
         coin_id = next((coin for coin in CRYPTO_SYMBOLS if coin in lower), "")
@@ -90,14 +123,15 @@ class MarketDataEngine:
             if crypto.success:
                 return {"symbol": symbol, "latest_price": float(crypto.data["price"]),
                         "previous_close": None, "currency": "EUR", "histories": {},
-                        "provider": self.coingecko.name, "fetched_at": crypto.fetched_at, "error": ""}
+                        "provider": self.coingecko.name, "confidence": crypto.confidence,
+                        "fetched_at": crypto.fetched_at, "error": ""}
             if crypto.error: errors.append(crypto.error)
         return {"symbol": symbol, "latest_price": None, "previous_close": None, "currency": "",
                 "histories": {}, "provider": "", "fetched_at": "",
                 "error": "; ".join(dict.fromkeys(errors)) or "Live price unavailable"}
 
     def fx_rate_to_eur(self, currency: str):
-        """ECB-first FX waterfall with yfinance fallback inside ECBProvider."""
+        """ECB-first FX waterfall with Alpha Vantage then yfinance fallback."""
         return self.ecb.get_rate_to_eur(currency)
 
     def _record(self, asset, result, action):
@@ -117,7 +151,7 @@ class MarketDataEngine:
                                             error_type,
                                             result.error or "No verified result")
         if result.status_code == 429:
-            warning = "OpenFIGI unauthenticated rate limit reached; remaining assets continue through yfinance/web enrichment."
+            warning = f"{result.provider} rate limit reached; remaining assets continue through fallback providers."
             if warning not in self.warnings: self.warnings.append(warning)
 
     def _can_try(self, provider: str, asset: dict) -> bool:
@@ -186,19 +220,43 @@ class MarketDataEngine:
             if figi.success:
                 figi_data = figi.data
                 output = merge_provider_data(output, figi.data, figi.provider, figi.confidence, self.audit)
+        resolver_asset = {**output, "openfigi_ticker": (figi_data or {}).get("ticker_id", ""),
+                          "exchange": (figi_data or {}).get("exchange", output.get("exchange", ""))}
+        resolution = dict(output.get("symbol_resolution") or {})
+        if self.alpha.is_enabled() and not str(output.get("alpha_vantage_symbol", "") or "").strip():
+            alpha_resolution = self.symbol_resolver.resolve_alpha_vantage_symbol(resolver_asset)
+            resolution.update(alpha_resolution)
+            for field in ("alpha_vantage_symbol", "alpha_vantage_last_price", "alpha_vantage_previous_close",
+                          "alpha_vantage_currency", "alpha_vantage_last_updated",
+                          "alpha_vantage_symbol_confidence"):
+                if alpha_resolution.get(field) not in (None, ""):
+                    output[field] = alpha_resolution[field]
+            if alpha_resolution.get("alpha_vantage_symbol_confidence"):
+                output["alpha_vantage_confidence"] = alpha_resolution["alpha_vantage_symbol_confidence"]
         if not str(output.get("price_symbol", "") or "").strip():
-            resolver_asset = {**output, "openfigi_ticker": (figi_data or {}).get("ticker_id", ""),
-                              "exchange": (figi_data or {}).get("exchange", output.get("exchange", ""))}
             resolution = self.symbol_resolver.resolve_price_symbol(resolver_asset)
-            output["symbol_resolution"] = resolution
             if resolution.get("chosen_symbol"):
                 output["resolved_price_symbol"] = resolution["chosen_symbol"]
                 if not output.get("price_symbol"): output["price_symbol"] = resolution["chosen_symbol"]
+        if resolution:
+            output["symbol_resolution"] = resolution
         candidates = self._symbol_candidates(output, figi_data)
         output["suggested_price_symbols"] = candidates
         live = None; selected_symbol = str(output.get("resolved_price_symbol") or output.get("price_symbol") or "")
+        live_symbol = selected_symbol
         ordered_symbols = ([selected_symbol] if selected_symbol else []) + [item for item in candidates if item != selected_symbol]
-        if self._can_try(self.yahoo.name, output):
+        alpha_symbol = str(output.get("alpha_vantage_symbol", "") or "").strip()
+        if alpha_symbol and self._can_try(self.alpha.name, output):
+            alpha_quote = self.alpha.get_price(alpha_symbol)
+            self._record(output, alpha_quote, f"Alpha Vantage price attempt {alpha_symbol}")
+            if alpha_quote.success:
+                live, live_symbol = alpha_quote, alpha_symbol
+                output.update({"alpha_vantage_last_price": alpha_quote.data.get("price"),
+                               "alpha_vantage_previous_close": alpha_quote.data.get("previous_close"),
+                               "alpha_vantage_currency": alpha_quote.data.get("currency", ""),
+                               "alpha_vantage_last_updated": alpha_quote.fetched_at,
+                               "alpha_vantage_confidence": alpha_quote.confidence})
+        if not live and self._can_try(self.yahoo.name, output):
             for symbol in ordered_symbols:
                 if not self._can_try(self.yahoo.name, output): break
                 result = self.yahoo.get_price(symbol); self._record(output, result, f"price attempt {symbol}")
@@ -206,34 +264,50 @@ class MarketDataEngine:
                     history = self.yahoo.get_history(symbol, "1mo")
                     self._record(output, history, f"history validation {symbol}")
                     if history.success:
-                        live, selected_symbol = result, symbol; break
+                        live, selected_symbol, live_symbol = result, symbol, symbol; break
                 time.sleep(self.rate_limit_seconds)
         if not live and self._can_try(self.stooq.name, output):
             for symbol in ordered_symbols[:4]:
                 if not self._can_try(self.stooq.name, output): break
                 result = self.stooq.get_price(symbol); self._record(output, result, f"Stooq price attempt {symbol}")
                 if result.success and result.data.get("history_rows", 0) > 1:
-                    live, selected_symbol = result, symbol; break
+                    live, selected_symbol, live_symbol = result, symbol, symbol; break
         if not live and self.scraping_enabled and self._can_try(self.web_price.name, output):
             web_price = self.web_price.get_price(output); self._record(output, web_price, "public product-page price")
-            if web_price.success: live = web_price
+            if web_price.success: live = web_price; live_symbol = selected_symbol
         if (not live and str(output.get("category", "")).lower() == "crypto"
                 and self._can_try(self.coingecko.name, output)):
             coin_id = next((coin for coin in CRYPTO_SYMBOLS if coin in str(output.get("instrument", "")).lower()), "")
             crypto = self.coingecko.get_price_eur(coin_id); self._record(output, crypto, "crypto fallback")
-            if crypto.success: live = crypto; selected_symbol = selected_symbol or CRYPTO_SYMBOLS.get(coin_id, "")
+            if crypto.success:
+                live = crypto; selected_symbol = selected_symbol or CRYPTO_SYMBOLS.get(coin_id, ""); live_symbol = selected_symbol
         if live:
-            if not output.get("price_symbol"): output["price_symbol"] = selected_symbol
+            if not output.get("price_symbol") and live.provider != self.alpha.name:
+                output["price_symbol"] = selected_symbol
             price = live.data["price"]; currency = live.data.get("currency") or output.get("currency") or "EUR"
             output.update({"live_current_price": price, "latest_price": price, "currency": currency,
-                           "price_source": "Live market data", "data_source": live.provider,
+                           "price_source": live.provider, "data_source": live.provider,
                            "data_confidence": live.confidence, "last_updated": live.fetched_at})
             if live.data.get("source_url") and not output.get("source_url"):
                 output["source_url"] = live.data["source_url"]
-            metadata = (self.yahoo.get_metadata(selected_symbol) if self._can_try(self.yahoo.name, output)
-                        else self.yahoo.failure("Retry cooldown active"))
+        fund_type = str(output.get("asset_type", "")) in {"ETF", "ETC", "ETP"}
+        if fund_type and alpha_symbol and self._can_try(self.alpha.name, output):
+            alpha_metadata = self.alpha.get_etf_profile(alpha_symbol)
+            self._record(output, alpha_metadata, "ETF profile")
+            if alpha_metadata.success:
+                verified = {key: value for key, value in alpha_metadata.data.items()
+                            if key in {"ter_pct", "ter_percent", "fund_size_eur", "fund_size_native",
+                                       "turnover", "sectors", "holdings", "currency"}}
+                for field in ("ter_pct", "fund_size_eur"):
+                    if output.get(field) in (None, "", 0) and verified.get(field) not in (None, "", 0):
+                        output[field] = verified[field]
+                output = merge_provider_data(output, verified, alpha_metadata.provider,
+                                             alpha_metadata.confidence, self.audit)
+        if selected_symbol and self._can_try(self.yahoo.name, output):
+            metadata = self.yahoo.get_metadata(selected_symbol)
             self._record(output, metadata, "quote/fund metadata")
-            if metadata.success: output = merge_provider_data(output, metadata.data, metadata.provider, metadata.confidence, self.audit)
+            if metadata.success:
+                output = merge_provider_data(output, metadata.data, metadata.provider, metadata.confidence, self.audit)
         currency = str(output.get("currency", "EUR") or "EUR")
         fx = (self.ecb.get_rate_to_eur(currency) if self._can_try(self.ecb.name, output)
               else self.ecb.failure("Retry cooldown active"))
@@ -253,7 +327,6 @@ class MarketDataEngine:
             selected_price = 0.0; output["price_source"] = "Missing"
         # Position value and P/L are intentionally calculated only in valuation.py.
         output["selected_price"] = selected_price
-        fund_type = str(output.get("asset_type", "")) in {"ETF", "ETC", "ETP"}
         missing_fund_data = fund_type and (not output.get("ter_pct") or not output.get("fund_size_eur"))
         if self.scraping_enabled and (force_web or missing_fund_data or not output.get("price_symbol")):
             scraped = scrape_asset_metadata(output)

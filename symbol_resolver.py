@@ -5,9 +5,15 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from data_cache import parse_timestamp
-from providers import StooqProvider, YFinanceProvider
+from providers import AlphaVantageProvider, StooqProvider, YFinanceProvider
 
 EU_SUFFIXES = [".DE", ".F", ".SG", ".MU", ".BE", ".AS", ".MI", ".PA", ".L", ""]
+ALPHA_EXCHANGE_SUFFIXES = {
+    "XETRA": ".DEX", "XETR": ".DEX", "DEX": ".DEX", "DE": ".DEX", "GERMANY": ".DEX",
+    "LONDON": ".LON", "LSE": ".LON", "LN": ".LON",
+    "AMSTERDAM": ".AMS", "AMS": ".AMS", "MILAN": ".MIL", "MIL": ".MIL",
+    "PARIS": ".PAR", "PAR": ".PAR", "SWITZERLAND": ".SWX", "SWX": ".SWX",
+}
 _MEMORY_CACHE: dict[str, dict] = {}
 
 
@@ -39,6 +45,28 @@ def generate_yahoo_candidates(asset: dict) -> list[str]:
     return generate_exchange_candidates(asset)
 
 
+def generate_alpha_vantage_candidates(asset: dict) -> list[str]:
+    """Generate only defensible Alpha Vantage symbols; search results are preferred."""
+    exact = str(asset.get("alpha_vantage_symbol", "") or "").strip().upper()
+    price_symbol = str(asset.get("price_symbol", "") or "").strip().upper()
+    exchange = str(asset.get("exchange", "") or asset.get("region", "") or "").strip().upper()
+    suffix = ALPHA_EXCHANGE_SUFFIXES.get(exchange, "")
+    candidates = [exact] if exact else []
+    # Unsuffixed US/global tickers and already-Alpha-formatted symbols are safe
+    # to test. Yahoo exchange suffixes are intentionally not translated here.
+    if price_symbol and ("." not in price_symbol or price_symbol.endswith(tuple(set(ALPHA_EXCHANGE_SUFFIXES.values())))):
+        candidates.append(price_symbol)
+    for base in (asset.get("openfigi_ticker"), asset.get("ticker_id")):
+        base = str(base or "").strip().upper()
+        if not base:
+            continue
+        if suffix:
+            candidates.append(base if base.endswith(suffix) else base + suffix)
+        if str(asset.get("isin", "")).upper().startswith("US") or not exchange:
+            candidates.append(base)
+    return list(dict.fromkeys(item for item in candidates if item))[:12]
+
+
 def avoid_recent_bad_symbols(symbols: list[str], bad_symbols: dict | None = None) -> list[str]:
     bad_symbols = bad_symbols or {}
     return [symbol for symbol in symbols
@@ -52,8 +80,9 @@ def is_probably_invalid_symbol_error(error: str) -> bool:
 
 
 class SymbolResolver:
-    def __init__(self, repository=None, yahoo=None, stooq=None):
+    def __init__(self, repository=None, yahoo=None, stooq=None, alpha=None):
         self.repository = repository; self.yahoo = yahoo or YFinanceProvider(); self.stooq = stooq or StooqProvider()
+        self.alpha = alpha or AlphaVantageProvider()
 
     def load_cached_symbol_resolution(self, key: str) -> dict | None:
         if self.repository:
@@ -102,6 +131,64 @@ class SymbolResolver:
                 "error": ("Price returned without recent history" if yahoo.success else yahoo.error) or stooq.error,
                 "last_tested": datetime.now(timezone.utc).isoformat()}
 
+    def resolve_alpha_vantage_symbol(self, asset: dict) -> dict:
+        """Resolve and cache a provider-specific symbol without rewriting Yahoo symbols."""
+        cached = self.load_cached_symbol_resolution(asset_key(asset)) or {}
+        tested_at = parse_timestamp(cached.get("alpha_vantage_last_tested"))
+        error = str(cached.get("alpha_vantage_error", "") or "")
+        retryable_error = any(term in error.lower() for term in ("rate limit", "paused", "timeout", "network"))
+        if tested_at and datetime.now(timezone.utc) - tested_at < timedelta(days=7):
+            if cached.get("alpha_vantage_symbol") or (error and not retryable_error):
+                return cached
+        if not self.alpha.is_enabled():
+            return {**cached, "alpha_vantage_symbol": "", "alpha_vantage_candidates": [],
+                    "alpha_vantage_error": "Alpha Vantage disabled: API key not configured"}
+
+        candidates: list[str] = []
+        query = str(asset.get("instrument") or asset.get("ticker_id") or asset.get("isin") or "").strip()
+        search_error = ""
+        if query:
+            search = self.alpha.search_symbols(query)
+            if search.success:
+                ranked = sorted(search.data.get("matches", []),
+                                key=lambda item: (str(item.get("currency", "")).upper() == "EUR",
+                                                  float(item.get("match_score", 0) or 0)), reverse=True)
+                candidates.extend(str(item.get("symbol", "")) for item in ranked if item.get("symbol"))
+            else:
+                search_error = search.error
+                if search.status_code == 429:
+                    return {**cached, "alpha_vantage_symbol": "", "alpha_vantage_candidates": [],
+                            "alpha_vantage_error": search_error,
+                            "alpha_vantage_last_tested": datetime.now(timezone.utc).isoformat()}
+        candidates.extend(generate_alpha_vantage_candidates(asset))
+        candidates = list(dict.fromkeys(item for item in candidates if item))[:8]
+        attempts = []
+        for symbol in candidates:
+            quote = self.alpha.get_global_quote(symbol)
+            attempts.append({"symbol": symbol, "status": "Working" if quote.success else "Bad",
+                             "currency": quote.data.get("currency", "") if quote.success else "",
+                             "error": quote.error, "last_tested": quote.fetched_at})
+            if quote.success:
+                resolution = {**cached, "alpha_vantage_symbol": symbol,
+                              "alpha_vantage_candidates": attempts, "alpha_vantage_error": "",
+                              "alpha_vantage_symbol_confidence": "High",
+                              "alpha_vantage_last_tested": quote.fetched_at}
+                self.store_symbol_resolution(asset, resolution)
+                return resolution
+            if quote.status_code == 429:
+                search_error = quote.error
+                break
+        resolution = {**cached, "alpha_vantage_symbol": "", "alpha_vantage_candidates": attempts,
+                      "alpha_vantage_error": search_error or "No working Alpha Vantage symbol found",
+                      "alpha_vantage_symbol_confidence": "Low",
+                      "alpha_vantage_last_tested": datetime.now(timezone.utc).isoformat()}
+        # Invalid/no-match results get the seven-day cache. Transient provider
+        # failures remain retryable after the provider cooldown.
+        if not any(term in resolution["alpha_vantage_error"].lower()
+                   for term in ("rate limit", "paused", "timeout", "network")):
+            self.store_symbol_resolution(asset, resolution)
+        return resolution
+
     @staticmethod
     def select_best_symbol(tested: list[dict]) -> dict | None:
         working = [item for item in tested if item.get("price_available") and item.get("history_available")]
@@ -110,6 +197,9 @@ class SymbolResolver:
 
     def resolve_price_symbol(self, asset: dict) -> dict:
         cached = self.load_cached_symbol_resolution(asset_key(asset)) or {}
+        if self.alpha.is_enabled() and not cached.get("alpha_vantage_symbol"):
+            alpha_resolution = self.resolve_alpha_vantage_symbol(asset)
+            cached = {**cached, **alpha_resolution}
         tested_at = parse_timestamp(cached.get("last_tested"))
         if cached.get("chosen_symbol") and tested_at and datetime.now(timezone.utc) - tested_at < timedelta(days=7):
             return cached
@@ -117,12 +207,20 @@ class SymbolResolver:
         for symbol in avoid_recent_bad_symbols(generate_yahoo_candidates(asset), bad):
             result = self.test_symbol(symbol); tested.append(result)
             if result["status"] == "Working":
-                resolution = {"chosen_symbol": symbol, "candidate_symbols": tested, "bad_symbols": bad,
+                resolution = {**{key: cached.get(key) for key in ("alpha_vantage_symbol", "alpha_vantage_candidates",
+                                                                  "alpha_vantage_error", "alpha_vantage_symbol_confidence",
+                                                                  "alpha_vantage_last_tested")
+                                 if key in cached},
+                              "chosen_symbol": symbol, "candidate_symbols": tested, "bad_symbols": bad,
                               "confidence": "High" if result["source"] == "yfinance" and result["history_available"] else "Medium",
                               "source": result["source"], "last_tested": result["last_tested"], "error": ""}
                 self.store_symbol_resolution(asset, resolution); return resolution
             bad[symbol] = {"reason": result["error"], "last_tested": result["last_tested"]}
-        resolution = {"chosen_symbol": "", "candidate_symbols": tested, "bad_symbols": bad,
+        resolution = {**{key: cached.get(key) for key in ("alpha_vantage_symbol", "alpha_vantage_candidates",
+                                                          "alpha_vantage_error", "alpha_vantage_symbol_confidence",
+                                                          "alpha_vantage_last_tested")
+                         if key in cached},
+                      "chosen_symbol": "", "candidate_symbols": tested, "bad_symbols": bad,
                       "confidence": "Low", "source": "Symbol resolver", "last_tested": datetime.now(timezone.utc).isoformat(),
                       "error": "No working symbol found"}
         self.store_symbol_resolution(asset, resolution); return resolution

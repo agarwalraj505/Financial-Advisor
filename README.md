@@ -46,13 +46,13 @@ The stabilized data path has one responsibility per module:
 - `valuation.py` is the only module that calculates position value and P/L.
 - `app.py` triggers explicit refresh actions and renders cached results.
 
-The app enriches every holding and candidate through a free-data waterfall:
+The app enriches every holding and candidate through a provider waterfall:
 
 1. Preserve user-entered facts.
 2. Map ISINs with unauthenticated OpenFIGI.
-3. Search and test yfinance symbols.
-4. Fetch prices, history, currency, and available fund metadata from yfinance.
-5. Convert currencies using the ECB Data Portal, then yfinance FX as fallback.
+3. Use Alpha Vantage symbol search, quotes, daily history, and ETF profiles when its optional key is configured.
+4. Search and test yfinance symbols, then use yfinance and Stooq as fallbacks.
+5. Convert currencies using the ECB Data Portal, then Alpha Vantage and yfinance FX as fallbacks.
 6. Try yfinance crypto symbols and optional public CoinGecko.
 7. Search public web sources for unresolved metadata.
 8. Safely scrape source-ranked, robots-permitted pages.
@@ -64,15 +64,15 @@ User-entered values are never silently overwritten. Conflicts are stored as sugg
 
 Every position exposes one explicit source: **Live market data**, a user-confirmed **Scalable screenshot**, **Manual fallback**, or **Missing**. Resolved market symbols are stored separately from entered symbols, so enrichment does not silently rewrite the portfolio record.
 
-EUR values use ECB FX first and yfinance FX second. GBp/GBX quotes are treated as pence—one hundredth of GBP—which avoids the common 100× valuation error.
+EUR values use ECB FX first, Alpha Vantage second when configured, and yfinance FX third. GBp/GBX quotes are treated as pence—one hundredth of GBP—which avoids the common 100× valuation error.
 
 ### Free-source waterfall
 
 - Identifiers: entered values → unauthenticated OpenFIGI mapping/name search → bounded Yahoo candidates → public search → permitted issuer/aggregator pages → manual repair.
-- Prices: entered fallback → exact yfinance symbol → cached symbol candidates → conservative Stooq fallback → crypto yfinance/CoinGecko → manual fallback.
+- Prices: entered fallback → cached live quote → Alpha Vantage provider symbol → exact yfinance symbol → cached symbol candidates → conservative Stooq fallback → crypto yfinance/CoinGecko → manual fallback.
 - Public price fallback: permitted issuer/exchange/product pages are checked after yfinance and Stooq. Low-confidence snippets are never used for valuation.
-- FX: ECB Data Portal → yfinance pair → confirmed manual FX.
-- Fund facts: entered facts → yfinance metadata → issuer factsheet/KID HTML or PDF → permitted ETF aggregator → manual confirmation.
+- FX: ECB Data Portal → Alpha Vantage exchange rate → yfinance pair → confirmed manual FX.
+- Fund facts: entered facts → Alpha Vantage ETF profile → issuer factsheet/KID HTML or PDF → yfinance metadata → permitted ETF aggregator → manual confirmation.
 - News: public GDELT DOC API → configured RSS → yfinance asset news → relevance ranking and transparent sentiment.
 
 Sources can time out, rate-limit, omit fields, or disagree. The app therefore maximizes legal free coverage but never claims completeness or invents a value.
@@ -119,6 +119,16 @@ APP_PASSWORD = "use-a-long-random-password"
 ```
 
 yfinance, unauthenticated OpenFIGI, ECB, RSS, and permitted public pages require no paid key. `OPENFIGI_API_KEY` and `COINGECKO_API_KEY` are optional. FMP and Twelve Data remain disabled unless their optional keys exist; their absence never blocks the app.
+
+### Optional Alpha Vantage setup
+
+1. Go to Streamlit Community Cloud.
+2. Open **Manage app → Settings → Secrets**.
+3. Add `ALPHA_VANTAGE_API_KEY = "your-key"` without committing it to GitHub.
+4. Reboot the app.
+5. Open **Settings** to confirm that Alpha Vantage is enabled.
+
+Alpha Vantage improves provider-specific symbol search, quotes, daily history, FX fallback, and ETF profile data. Its responses can be rate-limited or end-of-day; the engine automatically continues through yfinance, Stooq, and manual fallback. Always check the final live price in Scalable Capital before execution.
 
 Free sources often do not provide dependable ETF TER data. A candidate ETF/ETC/ETP cannot become buy/add eligible until cost data is confirmed or extracted from a high-confidence source. Existing holdings can still be valued when TER is absent.
 
@@ -177,7 +187,7 @@ The optimizer can add, pause, increase, reduce, or remove app records while keep
 4. Run all of `supabase_schema.sql` in Supabase SQL Editor.
 5. Create a Streamlit Community Cloud app from the GitHub repository.
 6. Set the main file to `app.py`.
-7. Add the three required secrets shown above.
+7. Add the three required secrets shown above. Optionally add `ALPHA_VANTAGE_API_KEY`.
 8. Reboot the app and log in with `APP_PASSWORD`.
 9. Add holdings and candidates, then save them to Supabase.
 10. Refresh prices/metadata and save a valuation snapshot.
