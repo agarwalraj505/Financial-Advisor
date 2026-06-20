@@ -29,6 +29,12 @@ def test_authenticated_portfolio_page_starts_without_paid_keys(monkeypatch):
     app.button[0].click().run(timeout=30)
     assert not app.exception
     assert app.radio[0].options == ["Portfolio", "Market", "Strategy", "Rebalance", "Settings"]
+    assert "Quick Refresh Prices" in [button.label for button in app.button]
     for section in ["Market", "Strategy", "Rebalance", "Settings"]:
         app.radio[0].set_value(section).run(timeout=30)
         assert not app.exception, section
+        labels = [button.label for button in app.button]
+        if section == "Market":
+            assert {"Quick Refresh Prices", "Repair Missing Symbols", "Run Deep Data Scan"}.issubset(labels)
+        if section == "Rebalance":
+            assert "Run Full Rebalance" in labels

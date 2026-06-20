@@ -28,8 +28,7 @@ from optimizer import generate_market_aware_recommendations, recommendation_exec
 from provider_registry import get_provider_registry
 from recommendation_engine import build_recommendation_report
 from rebalancer import (allocation_table, calculate_allocation, calculate_drift, calculate_total_invested,
-                        calculate_total_value, calculate_unrealised_pl, holdings_to_dataframe,
-                        savings_plans_to_dataframe)
+                        calculate_total_value, calculate_unrealised_pl, holdings_to_dataframe)
 from sample_data import (CANDIDATE_COLUMNS, SAMPLE_CANDIDATES, SAMPLE_HOLDINGS, SAMPLE_SAVINGS_PLANS,
                          SUPPORTED_CATEGORIES, TARGET_ALLOCATIONS)
 from savings_plan_optimizer import optimize_savings_plans
@@ -48,13 +47,13 @@ from styles import inject_premium_css
 from strategy_engine import (create_strategy_explanation, get_current_strategy,
                              refresh_market_strategy)
 from supabase_client import SupabaseConnectionError, SupabaseGateway, get_supabase_client
-from ui_components import (render_alert, render_data_quality_badge,
+from ui_components import (render_alert,
                            render_empty_state, render_flow_steps, render_hero_summary,
                            render_metric_card, render_news_card, render_page_header,
                            render_rebalance_summary, render_recommendation_card,
                            render_section_card, render_status_pill, render_strategy_summary_card,
                            render_flash_message, safe_toast, set_flash_success,
-                           gap_card, source_badge)
+                           gap_card)
 from valuation import calculate_historical_gains, portfolio_market_history, valuate_holdings
 
 st.set_page_config(page_title="Financial Hub", page_icon="◆", layout="wide",
@@ -341,23 +340,9 @@ def refresh_live_data(force=False):
         render_alert("Live price unavailable; run Data Enrichment, then use manual fallback after enrichment failed: " + ", ".join(failed), "warning")
 
 
-def refresh_controls(key: str):
-    a, b = st.columns([1, 3])
-    if a.button("Refresh market data", type="primary", key=key):
-        with st.spinner("Fetching Yahoo Finance estimates..."):
-            refresh_live_data(True)
-    b.caption("Last successful fetch: " + str(st.session_state.last_price_fetch or "None yet"))
-
-
-def _gain_metric(column, label, gain):
-    column.metric(label, "Not enough history yet" if gain is None else f"€{gain['eur']:+,.2f}",
-                  None if gain is None else f"{gain['pct']:+.2f}%")
-
-
 def valuation_dashboard():
     render_section_card("Live valuation", "Estimated portfolio value, performance windows, and data-quality diagnostics.")
     render_alert("Internet prices are research estimates. Check final live buy/sell prices manually in Scalable Capital before execution.", "warning")
-    refresh_controls("valuation_refresh")
     details, history = st.session_state.valuation_details, database.load_snapshots()
     total, invested, profit = calculate_total_value(details), calculate_total_invested(details), calculate_unrealised_pl(details)
     cash = float(details.loc[details["category"] == "Cash", "current_value_eur"].sum())
@@ -392,10 +377,14 @@ def valuation_dashboard():
     st.plotly_chart(create_current_vs_target_chart(comparison), width="stretch", key="valuation_target_chart")
     missing = details[details["price_source"] == "Missing"]
     fallback = details[(details["price_source"] == "Manual fallback") & (details["category"] != "Cash")]
+    stale = details[(details.get("price_stale", pd.Series(False, index=details.index)).fillna(False)) &
+                    (details["category"] != "Cash")]
     if not missing.empty:
         render_alert("Missing live and fallback prices: " + ", ".join(missing["instrument"]), "danger")
     if not fallback.empty:
         render_alert("Live price unavailable; using manual fallback after enrichment failed: " + ", ".join(fallback["instrument"]), "warning")
+    if not stale.empty:
+        render_alert("Stale market quote ignored for valuation: " + ", ".join(stale["instrument"]), "warning")
     chart_left, chart_right = st.columns(2)
     holdings_chart = details.sort_values("current_value_eur")
     holdings_figure = style_figure(px.bar(holdings_chart, x="current_value_eur", y="instrument", orientation="h",
@@ -435,7 +424,6 @@ def dashboard():
 
 def current_portfolio():
     render_section_card("Current holdings", "Edit app records, refresh market estimates, or import a portfolio CSV. Saving writes to your private Supabase project.")
-    refresh_controls("portfolio_refresh")
     existing = st.session_state.holdings.copy()
     show_advanced = st.toggle("Show advanced holding columns", value=False, key="portfolio_advanced_columns")
     compact_columns = ["instrument", "isin", "price_symbol", "resolved_price_symbol", "asset_type", "category", "quantity",
@@ -446,7 +434,9 @@ def current_portfolio():
     source = existing.get("price_source", pd.Series("Missing", index=existing.index)).fillna("Missing").astype(str)
     stale_flags = existing.get("price_stale", pd.Series(False, index=existing.index)).fillna(False).astype(bool)
     display["Data quality"] = [
-        "● Stale live price" if stale and "live" in value.lower()
+        "● Manual fallback · live quote stale" if stale and "manual" in value.lower()
+        else "● Scalable screenshot · live quote stale" if stale and "scalable" in value.lower()
+        else "● Stale live price" if stale and "live" in value.lower()
         else "● Scalable screenshot" if "scalable" in value.lower()
         else "● Manual fallback" if "manual" in value.lower()
         else "● Missing" if "missing" in value.lower() else "● Live market data"
@@ -479,23 +469,9 @@ def current_portfolio():
     c.download_button("Export holdings CSV", display.to_csv(index=False), "holdings_export.csv", "text/csv")
 
 
-def upload_screenshots_page():
-    render_section_card("Upload holdings screenshots")
-    render_alert("Screenshots are uploaded to private Supabase Storage, never GitHub. No broker connection is used.", "info")
-    files = st.file_uploader("Choose screenshots", type=["png", "jpg", "jpeg", "webp"],
-                             accept_multiple_files=True, key="supabase_screenshots")
-    storage = ScreenshotStorage(gateway, user_id)
-    for index, image in enumerate(files):
-        st.image(image, caption=image.name, width=380)
-        if st.button(f"Save {image.name} privately", key=f"save_image_{index}_{image.name}"):
-            path = storage.upload(image.name, image.getvalue(), image.type or "application/octet-stream")
-            safe_toast(f"Saved privately as {path}", "💾")
-
-
 def candidate_universe():
     render_section_card("Candidate assets", "Research assets you do not own yet without weakening buy/add readiness rules.")
     render_alert("The Market Data Engine enriches first. Unresolved or conflicting facts move to manual fallback after enrichment failed; incomplete candidates stay blocked from buy/add.", "info")
-    refresh_controls("candidate_refresh")
     scored = st.session_state.scored_candidates
     editable = st.session_state.candidates.copy()
     for column in ["quality_score", "momentum_score", "cost_score", "portfolio_fit_score",
@@ -529,7 +505,6 @@ def candidate_universe():
 
 def market_research_dashboard():
     render_section_card("Market research", "Rankings combine momentum, quality, cost, portfolio fit, and risk control.")
-    refresh_controls("research_refresh")
     current, candidates = st.session_state.scored_current, st.session_state.scored_candidates
     tables = [
         ("1. Best current holdings", current.sort_values("total_score", ascending=False).head(10)),
@@ -650,7 +625,11 @@ def recommendation_report_page():
         database.save_recommendations(report); safe_toast("Recommendation report saved", "💾")
 
 
-def _run_data_enrichment(force_web: bool = False, selected_isin: str | None = None,
+def _asset_matches(row, identifier: str) -> bool:
+    return str(row.get("isin") or row.get("instrument") or "") == str(identifier)
+
+
+def _run_data_enrichment(force_web: bool = False, selected_identifier: str | None = None,
                          target: str = "all"):
     """Run the free/no-key waterfall and keep every attempt visible in the audit."""
     settings = st.session_state.settings
@@ -662,19 +641,19 @@ def _run_data_enrichment(force_web: bool = False, selected_isin: str | None = No
     engine = MarketDataEngine(settings.get("scraping_enabled", True), settings.get("rate_limit_seconds", .25))
     holdings = st.session_state.holdings
     candidates = st.session_state.candidates
-    if selected_isin:
-        holding_mask = holdings["isin"].astype(str) == selected_isin
-        candidate_mask = candidates["isin"].astype(str) == selected_isin
+    if selected_identifier:
+        holding_mask = holdings.apply(lambda row: _asset_matches(row, selected_identifier), axis=1)
+        candidate_mask = candidates.apply(lambda row: _asset_matches(row, selected_identifier), axis=1)
         if holding_mask.any():
             enriched, audit = engine.enrich_assets(holdings.loc[holding_mask], False, force_web)
             replacement = enriched.iloc[0].to_dict()
-            records = [replacement if str(row.get("isin")) == selected_isin else row
+            records = [replacement if _asset_matches(row, selected_identifier) else row
                        for row in holdings.to_dict("records")]
             holdings = pd.DataFrame(records)
         elif candidate_mask.any():
             enriched, audit = engine.enrich_assets(candidates.loc[candidate_mask], True, force_web)
             replacement = enriched.iloc[0].to_dict()
-            records = [replacement if str(row.get("isin")) == selected_isin else row
+            records = [replacement if _asset_matches(row, selected_identifier) else row
                        for row in candidates.to_dict("records")]
             candidates = pd.DataFrame(records)
         else:
@@ -817,7 +796,8 @@ def _run_deep_scan_chunk(max_assets: int = 5, progress_callback=None) -> dict:
         except (AttributeError, SupabaseConnectionError): pass
     recompute_models()
     gaps = generate_data_gap_report(st.session_state.scored_current, st.session_state.scored_candidates,
-                                    st.session_state.get("provider_failures", []))
+                                    st.session_state.get("provider_failures", []),
+                                    st.session_state.get("symbol_resolution_cache", []))
     st.session_state.data_gap_report = gaps; job["warnings"] = list(job.get("warnings", [])) + result["warnings"]
     job["status"] = "Completed" if result["remaining"] == 0 else "Paused"
     job["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -932,10 +912,10 @@ def portfolio_section():
     with cards[6]: render_metric_card("Data quality", f"{live_count}/{len(non_cash)} live",
                                       f"{fallback_count} confirmed fallback", "warning" if fallback_count else "positive")
     action_left, action_right = st.columns([1, 3])
-    if action_left.button("Refresh all prices and metadata", type="primary", use_container_width=True):
-        with st.spinner("Refreshing prices, FX, identifiers, and available metadata..."):
-            refresh_live_data(True); _run_data_enrichment(False)
-        set_flash_success("Portfolio market data refreshed"); st.rerun()
+    if action_left.button("Quick Refresh Prices", type="primary", use_container_width=True):
+        with st.spinner("Refreshing verified prices and FX..."):
+            refresh_live_data(True)
+        set_flash_success("Portfolio prices refreshed"); st.rerun()
     action_right.caption("Prices are estimates for research. Scalable Capital remains the final execution source.")
     dashboard()
     current_portfolio()
@@ -951,189 +931,40 @@ def portfolio_section():
                            "valuation_history.csv", "text/csv")
 
 
-def _missing_data_frame() -> pd.DataFrame:
-    combined = pd.concat([st.session_state.holdings.assign(dataset="Holding"),
-                          st.session_state.candidates.assign(dataset="Candidate")],
-                         ignore_index=True, sort=False)
-    checks = {"price_symbol": "Price symbol", "ter_pct": "TER/cost", "asset_type": "Asset type",
-              "category": "Category", "factsheet_url": "Factsheet URL",
-              "scalable_compatible": "Scalable compatibility"}
-    rows = []
-    def missing_value(value):
-        if value is None or value is False or value == "": return True
-        try: return bool(pd.isna(value))
-        except (TypeError, ValueError): return False
-    for _, asset in combined.iterrows():
-        missing = []
-        for field, label in checks.items():
-            value = asset.get(field)
-            fund_only = field == "ter_pct" and str(asset.get("asset_type")) not in {"ETF", "ETC", "ETP"}
-            candidate_only = field == "scalable_compatible" and asset.get("dataset") != "Candidate"
-            if not fund_only and not candidate_only and missing_value(value):
-                missing.append(label)
-        if asset.get("metadata_conflicts"): missing.append("Conflicting metadata")
-        if str(asset.get("web_scrape_status", "")).lower() == "failed": missing.append("Failed web scrape")
-        if missing:
-            rows.append({"Dataset": asset.get("dataset"), "Instrument": asset.get("instrument"),
-                         "ISIN": asset.get("isin"), "Missing / repair needed": ", ".join(missing),
-                         "Last auto repair": asset.get("last_auto_repair_at", "")})
-    return pd.DataFrame(rows)
+def _missing_data_frame(gaps: pd.DataFrame | None = None) -> pd.DataFrame:
+    if gaps is None:
+        gaps = generate_data_gap_report(st.session_state.scored_current, st.session_state.scored_candidates,
+                                        st.session_state.get("provider_failures", []),
+                                        st.session_state.get("symbol_resolution_cache", []))
+    gaps = gaps[gaps.get("Dataset", pd.Series(dtype=str)).isin(["Holding", "Candidate"])]
+    if gaps.empty:
+        return pd.DataFrame(columns=["Dataset", "Instrument", "ISIN",
+                                     "Missing / repair needed", "Last auto repair"])
+    grouped = gaps.groupby(["Dataset", "Asset", "ISIN"], dropna=False).agg({
+        "Missing field": lambda values: ", ".join(dict.fromkeys(map(str, values))),
+        "Last attempt": "max"}).reset_index()
+    return grouped.rename(columns={"Asset": "Instrument", "Missing field": "Missing / repair needed",
+                                   "Last attempt": "Last auto repair"})
 
 
-def _replace_asset(dataset: str, isin: str, updated: dict):
+def _replace_asset(dataset: str, identifier: str, updated: dict):
     if dataset == "Holding":
-        records = [updated if str(row.get("isin")) == isin else row
+        records = [updated if _asset_matches(row, identifier) else row
                    for row in st.session_state.holdings.to_dict("records")]
         st.session_state.holdings = holdings_to_dataframe(records)
         database.save_holdings(st.session_state.holdings)
     else:
-        records = [updated if str(row.get("isin")) == isin else row
+        records = [updated if _asset_matches(row, identifier) else row
                    for row in st.session_state.candidates.to_dict("records")]
         st.session_state.candidates = _normalise_candidates(pd.DataFrame(records))
         database.save_candidates(st.session_state.candidates)
     recompute_models()
 
 
-def _legacy_market_data_news_section():
-    sentiment_state = st.session_state.sentiment
-    missing_summary = _missing_data_frame()
-    engine = MarketDataEngine(st.session_state.settings.get("scraping_enabled", True),
-                              st.session_state.settings.get("rate_limit_seconds", .25))
-    provider_rows = st.session_state.provider_status or engine.provider_status_rows(
-        st.session_state.settings.get("news_enabled", True))
-    live_sources = sum(str(row.get("Status")) == "Enabled" for row in provider_rows)
-    render_page_header("Market", "Live sources, identifier enrichment, repair workflows, and an evidence-ranked financial news feed.",
-                       f"{live_sources} sources active")
-    render_hero_summary("Market regime", sentiment_state.get("market_regime", "Neutral"),
-                        sentiment_state.get("sentiment", "Neutral"),
-                        f"{len(missing_summary)} assets need attention · Last refresh {st.session_state.last_price_fetch or 'not yet'}")
-    render_alert("Web-scraped data may be incomplete or outdated. Confirm important facts from the issuer factsheet before investing.", "warning")
-    tabs = [st.container() for _ in range(9)]
-    with tabs[0]:
-        render_section_card("Market Data Engine", "Free/no-key providers are tried first. Optional providers stay quiet when no key exists.")
-        provider_columns = st.columns(4)
-        for index, row in enumerate(provider_rows):
-            with provider_columns[index % 4]:
-                status = row.get("Status", "Unknown")
-                render_metric_card(row.get("Provider"), row.get("Purpose"), status,
-                                   "positive" if status == "Enabled" else "neutral")
-        st.dataframe(pd.DataFrame(provider_rows),
-                     width="stretch", hide_index=True)
-        st.caption("Free/no-key priority: yfinance → OpenFIGI → ECB → optional CoinGecko → safe web enrichment → manual fallback after failed enrichment.")
-    with tabs[1]:
-        ready_h = st.session_state.holdings
-        ready_c = st.session_state.candidates
-        cards = st.columns(4)
-        cards[0].metric("Valuation ready", int(ready_h.get("valuation_ready", pd.Series(False)).fillna(False).sum()))
-        cards[1].metric("Recommendation ready", int(ready_c.get("recommendation_ready", pd.Series(False)).fillna(False).sum()))
-        unresolved = ~ready_c.get("recommendation_ready", pd.Series(False)).fillna(False)
-        attempted = ready_c.get("manual_review_attempted", pd.Series(False)).fillna(False)
-        cards[2].metric("Manual review after enrichment", int((unresolved & attempted).sum()))
-        cards[3].metric("Missing price symbol", int((ready_c.get("price_symbol", pd.Series(dtype=str)).fillna("") == "").sum()))
-        extra_cards = st.columns(2)
-        fund_mask = ready_c.get("asset_type", pd.Series(dtype=str)).isin(["ETF", "ETC", "ETP"])
-        extra_cards[0].metric("Missing TER/cost", int((fund_mask & ready_c.get("ter_pct", pd.Series(dtype=float)).isna()).sum()))
-        extra_cards[1].metric("Missing Scalable confirmation", int((~ready_c.get("scalable_compatible", pd.Series(False)).fillna(False)).sum()))
-        a, b, c = st.columns(3)
-        if a.button("Enrich holdings using free data"):
-            with st.spinner("Running market-data waterfall for holdings..."): _run_data_enrichment(False, target="holdings")
-            st.rerun()
-        if b.button("Enrich candidates using free data"):
-            with st.spinner("Running market-data waterfall for candidates..."): _run_data_enrichment(False, target="candidates")
-            st.rerun()
-        if c.button("Force enrich all missing ISIN data", type="primary"):
-            with st.spinner("Searching and safely scraping ranked public sources..."): _run_data_enrichment(True)
-            st.rerun()
-        for warning in st.session_state.enrichment_warnings: render_alert(warning, "warning")
-        if st.button("Retry failed enrichment"):
-            with st.spinner("Retrying unresolved assets through the full waterfall..."): _run_data_enrichment(True)
-            st.rerun()
-    with tabs[2]: candidate_universe()
-    with tabs[3]: market_research_dashboard()
-    with tabs[4]: asset_quality_dashboard()
-    with tabs[5]:
-        if st.button("Refresh news"):
-            with st.spinner("Fetching public RSS and market headlines..."): _refresh_news_and_strategy(False)
-        news = pd.DataFrame(st.session_state.news_items)
-        if news.empty: render_empty_state("No headlines cached", "Refresh the feed to collect legal public RSS and available market headlines.", "Refresh news")
-        else:
-            categories = ["All"] + sorted(news.get("category", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
-            selected_category = st.selectbox("Filter news by theme", categories, key="news_theme_filter")
-            filtered = news if selected_category == "All" else news[news["category"] == selected_category]
-            render_section_card("Latest market headlines", f"{len(filtered)} evidence items in this view.")
-            for _, item in filtered.head(12).iterrows():
-                render_news_card(item.get("title"), item.get("source"), item.get("published_at"),
-                                 item.get("sentiment"), item.get("url"))
-            with st.expander("Open compact news table"):
-                columns = [c for c in ["title", "source", "published_at", "category", "sentiment", "confidence", "url"] if c in filtered]
-                st.dataframe(filtered[columns], width="stretch", hide_index=True,
-                             column_config={"url": st.column_config.LinkColumn("Link")})
-    with tabs[6]:
-        sentiment = st.session_state.sentiment
-        render_hero_summary("Market sentiment", sentiment.get("sentiment", "Neutral"),
-                            sentiment.get("market_regime", "Neutral"), sentiment.get("explanation", ""))
-        render_data_quality_badge(sentiment.get("confidence", "Low") + " confidence")
-        if st.button("Use news in strategy refresh"):
-            _refresh_news_and_strategy(True); safe_toast("Strategy refreshed using current evidence", "🧠")
-    with tabs[7]:
-        missing = _missing_data_frame()
-        render_section_card("Missing Data Repair Center", "Repair identifiers and fund facts through the full enrichment waterfall before using a manual fallback.")
-        repair_labels = ["Price symbol", "TER/cost", "Category", "Factsheet URL", "Conflicting metadata"]
-        repair_cards = st.columns(5)
-        missing_text = missing.get("Missing / repair needed", pd.Series(dtype=str)).fillna("")
-        for column, label in zip(repair_cards, repair_labels):
-            count = int(missing_text.str.contains(label, case=False, regex=False).sum())
-            with column: render_metric_card(label, count, "Repair now" if count else "Complete", "warning" if count else "positive")
-        if missing.empty: render_empty_state("Data quality looks healthy", "No repair items are currently waiting.")
-        else: st.dataframe(missing, width="stretch", hide_index=True)
-        if not missing.empty:
-            selected = st.selectbox("Asset to repair", missing["ISIN"].astype(str).tolist(),
-                                    format_func=lambda value: missing.loc[missing["ISIN"].astype(str) == value, "Instrument"].iloc[0])
-            selected_summary = missing.loc[missing["ISIN"].astype(str) == selected].iloc[0]
-            dataset = selected_summary["Dataset"]
-            source_frame = st.session_state.holdings if dataset == "Holding" else st.session_state.candidates
-            asset = source_frame.loc[source_frame["isin"].astype(str) == selected].iloc[0].to_dict()
-            a, b = st.columns(2)
-            if a.button("Auto repair now", type="primary"):
-                with st.spinner("Trying every enabled free enrichment route..."): _run_data_enrichment(True, selected)
-                st.rerun()
-            if b.button("Search web and retry"):
-                with st.spinner("Searching source-ranked public pages..."): _run_data_enrichment(True, selected)
-                st.rerun()
-            suggestions = asset.get("enrichment_suggestions") if isinstance(asset.get("enrichment_suggestions"), dict) else {}
-            if suggestions:
-                suggestion_field = st.selectbox("Suggested field", list(suggestions), key="repair_suggestion_field")
-                st.json(suggestions[suggestion_field])
-                if st.button("Accept suggested value"):
-                    _replace_asset(dataset, selected, accept_suggestion(asset, suggestion_field)); st.rerun()
-            manual_fields = ["price_symbol", "ter_pct", "asset_type", "category", "factsheet_url",
-                             "scalable_compatible", "issuer", "currency"]
-            field = st.selectbox("Enter a confirmed value for", manual_fields, key="repair_manual_field")
-            manual_value = st.text_input("Confirmed value", key="repair_manual_value")
-            confirmed = st.checkbox("Mark confirmed", key="repair_confirmed")
-            if st.button("Save confirmed value", disabled=not (manual_value and confirmed)):
-                updated = dict(asset)
-                if field == "ter_pct":
-                    try: updated[field] = float(manual_value.replace(",", "."))
-                    except ValueError: render_alert("Enter TER as a number, for example 0.20", "danger"); st.stop()
-                elif field == "scalable_compatible":
-                    updated[field] = manual_value.strip().lower() in {"true", "yes", "1", "confirmed"}
-                else: updated[field] = manual_value.strip()
-                updated["confirmed_by_user"] = True
-                _replace_asset(dataset, selected, updated); st.rerun()
-            st.caption("Suggested values are retained separately when they conflict with user-entered data; confirmation is required before replacement.")
-    with tabs[8]:
-        audit = st.session_state.enrichment_audit
-        st.dataframe(audit, width="stretch", hide_index=True)
-        st.download_button("Export enrichment audit CSV", audit.to_csv(index=False),
-                           "enrichment_audit.csv", "text/csv")
-
-
 def market_data_news_section():
     """Readable vertical Market workspace; advanced detail lives in expanders, not tabs."""
     render_flash_message()
     sentiment = st.session_state.sentiment
-    missing = _missing_data_frame()
     providers = get_provider_registry()
     runtime_provider_status = {str(row.get("Provider")): row for row in st.session_state.get("provider_status", [])}
     for row in providers:
@@ -1143,7 +974,9 @@ def market_data_news_section():
     coverage = calculate_data_coverage(st.session_state.scored_current, st.session_state.scored_candidates,
                                        st.session_state.news_items)
     gap_report = generate_data_gap_report(st.session_state.scored_current, st.session_state.scored_candidates,
-                                          st.session_state.get("provider_failures", []))
+                                          st.session_state.get("provider_failures", []),
+                                          st.session_state.get("symbol_resolution_cache", []))
+    missing = _missing_data_frame(gap_report)
     st.session_state.data_gap_report = gap_report
     active_sources = sum(str(row.get("Status")) == "Enabled" for row in providers)
     render_page_header("Market", "Market-data health, missing-data repair, public news, sentiment, and candidate research.",
@@ -1163,17 +996,14 @@ def market_data_news_section():
     def progress_event(event):
         elapsed = f" · {event.get('elapsed', 0):.1f}s" if event.get("elapsed") is not None else ""
         progress_display.info(f"{event.get('asset', '')} · {event.get('provider', '')} · {event.get('status', '')}{elapsed}")
-    action_a, action_b, action_c, action_d = st.columns(4)
-    if action_a.button("Quick refresh prices", type="primary", use_container_width=True):
+    action_a, action_b, action_c = st.columns(3)
+    if action_a.button("Quick Refresh Prices", type="primary", use_container_width=True):
         with st.spinner("Refreshing prices and FX..."): refresh_live_data(True)
         set_flash_success("Live prices refreshed"); st.rerun()
-    if action_b.button("Repair missing symbols", use_container_width=True):
+    if action_b.button("Repair Missing Symbols", use_container_width=True):
         with st.spinner("Testing bounded symbol candidates..."): result = _repair_symbols_on_demand(progress_event)
         set_flash_success(f"Symbol repair finished: {result['resolved']} resolved"); st.rerun()
-    if action_c.button("Deep metadata scan", use_container_width=True):
-        with st.spinner("Processing a five-asset deep-scan chunk..."): result = _run_deep_scan_chunk(5, progress_event)
-        set_flash_success(f"Deep scan saved {result['processed']} assets; {result['remaining']} remain"); st.rerun()
-    if action_d.button("Refresh news & sentiment", use_container_width=True):
+    if action_c.button("Refresh News & Sentiment", use_container_width=True):
         with st.spinner("Fetching public market news..."): _refresh_news_and_strategy(False)
         set_flash_success("Market news refreshed"); st.rerun()
 
@@ -1212,11 +1042,13 @@ def market_data_news_section():
         else: st.dataframe(gap_report, width="stretch", hide_index=True)
 
     render_section_card("3. Missing Data Repair", "Suggestions remain separate from entered facts until you explicitly accept or confirm them.")
-    repair_labels = ["Price symbol", "TER/cost", "Category", "Factsheet URL", "Conflicting metadata"]
+    repair_labels = [("Price symbol", "symbol"), ("TER/cost", "TER/cost"),
+                     ("Category", "category"), ("Factsheet URL", "factsheet"),
+                     ("Metadata conflicts", "metadata conflict")]
     repair_cols = st.columns(5)
     missing_text = missing.get("Missing / repair needed", pd.Series(dtype=str)).fillna("")
-    for column, label in zip(repair_cols, repair_labels):
-        count = int(missing_text.str.contains(label, case=False, regex=False).sum())
+    for column, (label, token) in zip(repair_cols, repair_labels):
+        count = int(missing_text.str.contains(token, case=False, regex=False).sum())
         with column: render_metric_card(label, count, "Needs attention" if count else "Complete", "warning" if count else "positive")
     if missing.empty:
         render_empty_state("No repair items", "The current holdings and candidate universe have no detected repair queue.")
@@ -1225,8 +1057,9 @@ def market_data_news_section():
                               st.session_state.candidates.assign(dataset="Candidate")], ignore_index=True, sort=False)
         repair_rows = []
         for _, item in missing.iterrows():
+            identifier = str(item["ISIN"] or item["Instrument"])
             matches = combined[(combined["dataset"] == item["Dataset"]) &
-                               (combined["isin"].astype(str) == str(item["ISIN"]))]
+                               combined.apply(lambda row: _asset_matches(row, identifier), axis=1)]
             asset = matches.iloc[0].to_dict() if not matches.empty else {}
             audit = asset.get("enrichment_audit") if isinstance(asset.get("enrichment_audit"), list) else []
             tried = ", ".join(dict.fromkeys(str(entry.get("provider", "")) for entry in audit if entry.get("provider"))) or "Not run yet"
@@ -1238,12 +1071,13 @@ def market_data_news_section():
                                 "Confidence": first.get("confidence", asset.get("web_scrape_confidence", "")),
                                 "Action": "Review suggestion" if suggestions else "Auto repair"})
         st.dataframe(pd.DataFrame(repair_rows), width="stretch", hide_index=True)
-        selected = st.selectbox("Choose an asset to repair", missing["ISIN"].astype(str).tolist(), key="market_repair_asset",
-                                format_func=lambda value: missing.loc[missing["ISIN"].astype(str) == value, "Instrument"].iloc[0])
-        selected_summary = missing.loc[missing["ISIN"].astype(str) == selected].iloc[0]
+        selected_row = st.selectbox("Choose an asset to repair", list(missing.index), key="market_repair_asset",
+                                    format_func=lambda index: f"{missing.loc[index, 'Instrument']} · {missing.loc[index, 'ISIN'] or 'No ISIN'}")
+        selected_summary = missing.loc[selected_row]
         dataset = selected_summary["Dataset"]
+        selected = str(selected_summary["ISIN"] or selected_summary["Instrument"])
         source_frame = st.session_state.holdings if dataset == "Holding" else st.session_state.candidates
-        asset = source_frame.loc[source_frame["isin"].astype(str) == selected].iloc[0].to_dict()
+        asset = source_frame.loc[source_frame.apply(lambda row: _asset_matches(row, selected), axis=1)].iloc[0].to_dict()
         repair_a, repair_b = st.columns(2)
         if repair_a.button("Auto repair selected asset", type="primary", use_container_width=True):
             with st.spinner("Trying provider and web enrichment sources..."): _run_data_enrichment(True, selected)
@@ -1429,13 +1263,14 @@ def rebalance_section():
     render_flash_message()
     render_page_header("Rebalance", "One evidence-led superflow for prices, metadata, news, strategy, allocation, savings plans, and execution planning.",
                        "Decision support only")
-    render_hero_summary("Full portfolio review", "Run full rebalance", "One guided workflow",
+    render_hero_summary("Full portfolio review", "Run Full Rebalance", "One guided workflow",
                         "Refreshes market evidence and produces a manual Scalable execution checklist. It never places an order.")
     render_alert("No broker connection, orders, or automatic savings-plan updates. Check the live Scalable price before every execution.", "warning")
     coverage = calculate_data_coverage(st.session_state.scored_current, st.session_state.scored_candidates,
                                        st.session_state.news_items)
     gaps = generate_data_gap_report(st.session_state.scored_current, st.session_state.scored_candidates,
-                                    st.session_state.get("provider_failures", []))
+                                    st.session_state.get("provider_failures", []),
+                                    st.session_state.get("symbol_resolution_cache", []))
     if not gaps.empty:
         render_alert(f"Recommendation quality reduced because {len(gaps)} fields or provider checks are unresolved.", "warning")
     if coverage["price_coverage"] < 90:
@@ -1458,7 +1293,7 @@ def rebalance_section():
         with flow_slot.container():
             render_flow_steps([{"label": label, "status": flow_state[index]} for index, label in enumerate(flow_labels)])
     draw_flow()
-    if st.button("Run full rebalance", type="primary", use_container_width=True):
+    if st.button("Run Full Rebalance", type="primary", use_container_width=True):
         flow_state = ["Pending"] * len(flow_labels); st.session_state.rebalance_flow_status = flow_state
         progress = st.progress(0, "Starting Market Data Engine...")
         flow_map = {"refresh_prices": 0, "enrich_assets": 1, "repair_missing_metadata": 1,
@@ -1614,35 +1449,57 @@ def settings_page():
         set_flash_success("Sample data restored"); st.rerun()
 
 
-user_id = require_authentication()
-if not user_id:
-    st.stop()
-try:
-    gateway = SupabaseGateway(get_supabase_client(user_id))
-    database = Database(gateway, user_id)
-    initialise_state(database)
-except SupabaseConnectionError as exc:
-    render_alert(str(exc), "danger")
-    render_alert("Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit secrets, then run supabase_schema.sql.", "info")
-    st.stop()
-
 PAGES = ["Portfolio", "Market", "Strategy", "Rebalance", "Settings"]
-with st.sidebar:
-    st.markdown('<div class="sidebar-brand"><div class="sidebar-title">Financial Hub</div>'
-                '<div class="sidebar-subtitle">Wealth command center</div></div>', unsafe_allow_html=True)
-    page = st.radio("Navigation", PAGES)
-    market_status = "Error" if st.session_state.enrichment_warnings else "Live" if st.session_state.settings.get("live_enabled", True) else "Disabled"
-    market_class = "danger-pill" if market_status == "Error" else "warning-pill" if market_status == "Disabled" else "info-pill"
-    refresh_text = str(st.session_state.last_price_fetch or "Not yet")
-    st.markdown(f'<div class="sidebar-status">'
-                f'<div class="sidebar-status-row"><span>Supabase</span><span class="success-pill status-pill">Connected</span></div>'
-                f'<div class="sidebar-status-row"><span>Market data</span><span class="{market_class} status-pill">{market_status}</span></div>'
-                f'<div class="sidebar-status-row"><span>Last refresh</span><span>{refresh_text}</span></div></div>',
-                unsafe_allow_html=True)
-    render_alert("Decision support only. No broker connection or auto-trading.", "info")
-    logout_button()
 
-{"Portfolio": portfolio_section, "Market": market_data_news_section,
- "Strategy": strategy_section, "Rebalance": rebalance_section, "Settings": settings_page}[page]()
-st.markdown('<div class="privacy-footer">Private app · Data saved in Supabase · No broker connection · No auto-trading</div>',
-            unsafe_allow_html=True)
+
+def main() -> None:
+    """Authenticate, load cached state, and render the selected page."""
+    global database
+    user_id = require_authentication()
+    if not user_id:
+        st.stop()
+    try:
+        gateway = SupabaseGateway(get_supabase_client(user_id))
+        database = Database(gateway, user_id)
+        initialise_state(database)
+    except SupabaseConnectionError as exc:
+        render_alert(str(exc), "danger")
+        render_alert(
+            "Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit secrets, then run supabase_schema.sql.",
+            "info",
+        )
+        st.stop()
+
+    with st.sidebar:
+        st.markdown('<div class="sidebar-brand"><div class="sidebar-title">Financial Hub</div>'
+                    '<div class="sidebar-subtitle">Wealth command center</div></div>', unsafe_allow_html=True)
+        page = st.radio("Navigation", PAGES)
+        market_status = (
+            "Error" if st.session_state.enrichment_warnings
+            else "Live" if st.session_state.settings.get("live_enabled", True)
+            else "Disabled"
+        )
+        market_class = (
+            "danger-pill" if market_status == "Error"
+            else "warning-pill" if market_status == "Disabled"
+            else "info-pill"
+        )
+        refresh_text = str(st.session_state.last_price_fetch or "Not yet")
+        st.markdown(f'<div class="sidebar-status">'
+                    f'<div class="sidebar-status-row"><span>Supabase</span><span class="success-pill status-pill">Connected</span></div>'
+                    f'<div class="sidebar-status-row"><span>Market data</span><span class="{market_class} status-pill">{market_status}</span></div>'
+                    f'<div class="sidebar-status-row"><span>Last refresh</span><span>{refresh_text}</span></div></div>',
+                    unsafe_allow_html=True)
+        render_alert("Decision support only. No broker connection or auto-trading.", "info")
+        logout_button()
+
+    {"Portfolio": portfolio_section, "Market": market_data_news_section,
+     "Strategy": strategy_section, "Rebalance": rebalance_section, "Settings": settings_page}[page]()
+    st.markdown(
+        '<div class="privacy-footer">Private app · Data saved in Supabase · No broker connection · No auto-trading</div>',
+        unsafe_allow_html=True,
+    )
+
+
+if __name__ == "__main__":
+    main()

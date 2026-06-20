@@ -33,7 +33,8 @@ def test_optimizer_sells_weak_overweight_before_buying_strong_candidate():
     assert result["Action"].isin(["Sell fully", "Sell partially"]).any()
     assert (result["Action"] == "Buy new asset").any()
     assert ordered.iloc[0]["Action"].startswith("Sell")
-    assert set(["Data source", "Timestamp", "Data confidence"]).issubset(result.columns)
+    assert {"Data source", "Timestamp", "Data confidence", "Price source", "Metadata source",
+            "Scalable execution warning"}.issubset(result.columns)
 
 
 def test_incomplete_existing_holding_is_not_sold_on_low_score_alone():

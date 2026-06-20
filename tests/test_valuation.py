@@ -32,10 +32,10 @@ def test_manual_price_fallback():
     assert valued.loc[0, "price_source"] == "Manual fallback"
 
 
-def test_cached_live_price_is_used_without_network_quote():
+def test_stale_cached_live_price_defers_to_manual_fallback():
     valued = valuate_holdings(holding(live_current_price=11, manual_current_price=9), {}, {"EUR": 1})
-    assert valued.loc[0, "current_value_eur"] == 22
-    assert valued.loc[0, "price_source"] == "Live market data"
+    assert valued.loc[0, "current_value_eur"] == 18
+    assert valued.loc[0, "price_source"] == "Manual fallback"
     assert bool(valued.loc[0, "price_stale"]) is True
 
 
@@ -68,10 +68,11 @@ def test_live_price_precedes_screenshot_and_manual_prices():
     assert valued.loc[0, "price_source"] == "Live market data"
 
 
-def test_expired_cached_quote_is_valued_but_marked_stale():
+def test_expired_cached_quote_falls_back_and_is_marked_stale():
     quote = MarketQuote("TEST", latest_price=50, currency="EUR", stale=True)
     valued = valuate_holdings(holding(), {"TEST": quote}, {"EUR": 1})
-    assert valued.loc[0, "current_value_eur"] == 100
+    assert valued.loc[0, "current_value_eur"] == 80
+    assert valued.loc[0, "price_source"] == "Manual fallback"
     assert bool(valued.loc[0, "price_stale"]) is True
 
 

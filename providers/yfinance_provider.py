@@ -70,3 +70,10 @@ class YFinanceProvider(BaseProvider):
             return self.success({key: value for key, value in data.items() if value not in (None, "")}, "Medium")
         except Exception as exc:
             return self.failure(str(exc) or "yfinance metadata failed")
+
+    def get_news(self, symbol: str) -> ProviderResult:
+        try:
+            items = yf.Ticker(symbol).news or []
+            return self.success({"items": items}, "Medium") if items else self.failure("No yfinance news")
+        except Exception as exc:
+            return self.failure(str(exc) or "yfinance news failed")

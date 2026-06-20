@@ -217,7 +217,9 @@ def generate_rebalance_trades(holdings_df: pd.DataFrame, drift_df: pd.DataFrame,
         if holding is None:
             rows.append(_hold_row(category, needed, "No directly tradable instrument is available in this category.", fee_threshold))
             continue
-        price = float(holding["live_current_price"] or holding["manual_current_price"]) * float(holding["fx_rate_to_eur"])
+        quantity_owned = float(holding.get("quantity", 0) or 0)
+        price = (float(holding.get("current_value_eur", 0) or 0) / quantity_owned
+                 if quantity_owned > 0 else 0.0)
         fractional = bool(holding["fractional_allowed"])
         quantity = needed / price if fractional and price > 0 else floor(needed / price) if price > 0 else 0
         value = quantity * price

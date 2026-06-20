@@ -8,6 +8,8 @@ import io
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+import pandas as pd
+
 from providers.base import BaseProvider
 
 
@@ -25,6 +27,9 @@ class StooqProvider(BaseProvider):
                 rows = list(csv.DictReader(io.StringIO(response.read().decode("utf-8", errors="ignore"))))
             closes = [float(row["Close"]) for row in rows if row.get("Close") not in (None, "", "N/D")]
             if not closes: return self.failure("No usable Stooq price")
-            return self.success({"price": closes[-1], "currency": "", "history_rows": len(closes), "symbol": symbol}, "Medium")
+            dates = [row.get("Date") for row in rows if row.get("Close") not in (None, "", "N/D")]
+            history = pd.DataFrame({"Close": closes}, index=pd.to_datetime(dates, errors="coerce"))
+            return self.success({"price": closes[-1], "currency": "", "history_rows": len(closes),
+                                 "history": history, "symbol": symbol}, "Medium")
         except Exception as exc:
             return self.failure(str(exc) or "Stooq price failed")

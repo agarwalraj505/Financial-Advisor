@@ -28,6 +28,7 @@ GAP_RULES = {
     "asset type": lambda a, candidate: not str(a.get("asset_type", "") or "").strip(),
     "Scalable compatibility": lambda a, candidate: candidate and not bool(a.get("scalable_compatible", False)),
     "FX": lambda a, candidate: str(a.get("currency", "EUR") or "EUR") != "EUR" and not _number(a.get("fx_rate_to_eur")),
+    "metadata conflict": lambda a, candidate: bool(a.get("metadata_conflicts")),
 }
 
 
@@ -35,7 +36,8 @@ NEXT_ACTION = {"price": "Confirm symbol, then enter a manual price only after fa
                "symbol": "Run symbol repair", "TER/cost": "Run deep metadata scan and confirm issuer factsheet",
                "factsheet": "Search issuer/KID sources", "category": "Confirm category manually",
                "asset type": "Map identifier or confirm asset type", "Scalable compatibility": "Confirm in Scalable manually",
-               "FX": "Retry ECB/yfinance FX or enter confirmed manual FX"}
+               "FX": "Retry ECB/yfinance FX or enter confirmed manual FX",
+               "metadata conflict": "Compare the entered and sourced values, then confirm one"}
 
 
 def _attempt_summary(asset: dict) -> tuple[str, str, str]:
@@ -47,7 +49,8 @@ def _attempt_summary(asset: dict) -> tuple[str, str, str]:
 
 
 def generate_data_gap_report(holdings: pd.DataFrame, candidates: pd.DataFrame,
-                             provider_failures: list[dict] | None = None) -> pd.DataFrame:
+                             provider_failures: list[dict] | None = None,
+                             symbol_resolutions: list[dict] | None = None) -> pd.DataFrame:
     rows = []
     for frame, candidate in ((holdings, False), (candidates, True)):
         for _, source in frame.iterrows():
@@ -58,7 +61,7 @@ def generate_data_gap_report(holdings: pd.DataFrame, candidates: pd.DataFrame,
                 if missing:
                     rows.append({"Dataset": "Candidate" if candidate else "Holding", "Asset": asset.get("instrument", ""),
                                  "ISIN": asset.get("isin", ""), "Missing field": field,
-                                 "Current value": asset.get("current_value_eur", ""),
+                                 "Current value": str(asset.get("current_value_eur", "") or ""),
                                  "Sources already tried": tried, "Last attempt": last_attempt,
                                  "Error": failure or "No verified value available",
                                  "Failure reason": failure or "No verified value available",
@@ -70,4 +73,13 @@ def generate_data_gap_report(holdings: pd.DataFrame, candidates: pd.DataFrame,
                      "Sources already tried": failure.get("provider", ""), "Last attempt": failure.get("created_at", ""),
                      "Error": failure.get("error_message", ""), "Failure reason": failure.get("error_message", ""),
                      "Suggested next action": "Retry after cooldown"})
+    for resolution in symbol_resolutions or []:
+        for symbol, detail in (resolution.get("bad_symbols") or {}).items():
+            rows.append({"Dataset": "Symbol cache", "Asset": resolution.get("instrument", ""),
+                         "ISIN": resolution.get("isin", ""), "Missing field": "Bad symbol",
+                         "Current value": symbol, "Sources already tried": "yfinance / Stooq",
+                         "Last attempt": detail.get("last_tested", resolution.get("last_tested", "")),
+                         "Error": detail.get("reason", "Invalid or incomplete quote/history"),
+                         "Failure reason": detail.get("reason", "Invalid or incomplete quote/history"),
+                         "Suggested next action": "Use cached resolved symbol or retry after the seven-day cooldown"})
     return pd.DataFrame(rows)

@@ -99,6 +99,16 @@ def test_data_gap_report_lists_precise_missing_fields():
     assert {"price", "symbol", "category", "asset type", "FX"}.issubset(set(gaps["Missing field"]))
 
 
+def test_data_gap_report_includes_bad_symbol_cache_reason():
+    gaps = generate_data_gap_report(pd.DataFrame(), pd.DataFrame(), symbol_resolutions=[{
+        "instrument": "Broken ETF", "isin": "IE00BAD", "bad_symbols": {
+            "BAD.DE": {"reason": "No price data", "last_tested": "2026-06-20T10:00:00+00:00"}}}])
+    row = gaps.iloc[0]
+    assert row["Missing field"] == "Bad symbol"
+    assert row["Current value"] == "BAD.DE"
+    assert row["Error"] == "No price data"
+
+
 def test_deep_scan_skips_fresh_complete_assets():
     now = datetime.now(timezone.utc).isoformat()
     holdings = pd.DataFrame([{"instrument": "A", "isin": "A", "valuation_ready": True,

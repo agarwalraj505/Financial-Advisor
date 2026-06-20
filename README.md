@@ -37,6 +37,15 @@ All valuation and performance figures remain estimates until confirmed against S
 
 ## 1. Market Data Engine
 
+The stabilized data path has one responsibility per module:
+
+- `symbol_resolver.py` resolves and caches verified symbols and seven-day bad-symbol cooldowns.
+- `providers/` contains provider-specific network calls.
+- `market_data_engine.py` owns quick quote, FX, and deep-enrichment waterfalls.
+- `market_data.py` is a compatibility facade; it contains no direct provider implementation.
+- `valuation.py` is the only module that calculates position value and P/L.
+- `app.py` triggers explicit refresh actions and renders cached results.
+
 The app enriches every holding and candidate through a free-data waterfall:
 
 1. Preserve user-entered facts.

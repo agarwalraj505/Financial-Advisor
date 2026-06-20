@@ -39,21 +39,24 @@ def _number(value, default=0.0) -> float:
 
 def select_position_price(row: dict, quote: MarketQuote | None = None) -> tuple[float, str, bool]:
     """Choose one explainable price without mutating entered screenshot values."""
-    if quote and quote.is_available:
-        return float(quote.latest_price), PRICE_SOURCE_LIVE, bool(quote.stale)
+    stale_live_available = bool(quote and quote.is_available and quote.stale)
+    if quote and quote.is_available and not quote.stale:
+        return float(quote.latest_price), PRICE_SOURCE_LIVE, False
     cached_live = _number(row.get("live_current_price"))
-    if cached_live > 0:
-        return cached_live, PRICE_SOURCE_LIVE, is_stale(row.get("last_updated"), "price")
+    cached_stale = cached_live > 0 and is_stale(row.get("last_updated"), "price")
+    stale_live_available = stale_live_available or cached_stale
+    if cached_live > 0 and not cached_stale:
+        return cached_live, PRICE_SOURCE_LIVE, False
     screenshot = _number(row.get("current_price_eur"))
     screenshot_evidence = any((row.get("screenshot_path"), row.get("screenshot_captured_at"),
                                str(row.get("source", "")).lower().startswith("scalable"),
                                bool(row.get("user_confirmed", False))))
     if screenshot > 0 and screenshot_evidence:
-        return screenshot, PRICE_SOURCE_SCREENSHOT, False
+        return screenshot, PRICE_SOURCE_SCREENSHOT, stale_live_available
     manual = _number(row.get("manual_current_price"))
     if manual > 0:
-        return manual, PRICE_SOURCE_MANUAL, False
-    return 0.0, PRICE_SOURCE_MISSING, False
+        return manual, PRICE_SOURCE_MANUAL, stale_live_available
+    return 0.0, PRICE_SOURCE_MISSING, stale_live_available
 
 
 def resolve_position_fx(currency: str, row: dict, fx_rates: dict[str, float]) -> tuple[float, str]:

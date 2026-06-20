@@ -10,9 +10,9 @@ from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 import streamlit as st
-import yfinance as yf
 
 from news_sources import GDELT_QUERY, MARKET_THEMES, RSS_SOURCES
+from providers import YFinanceProvider
 
 RSS_FEEDS = RSS_SOURCES
 
@@ -93,11 +93,12 @@ def get_market_news() -> list[dict]:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_asset_news(asset: dict) -> list[dict]:
-    symbol = str(asset.get("price_symbol", "") or "")
+    symbol = str(asset.get("resolved_price_symbol") or asset.get("price_symbol") or "")
     if not symbol: return []
     try:
         items = []
-        for raw in yf.Ticker(symbol).news or []:
+        result = YFinanceProvider().get_news(symbol)
+        for raw in result.data.get("items", []) if result.success else []:
             content = raw.get("content", raw)
             canonical = content.get("canonicalUrl", {}) if isinstance(content.get("canonicalUrl"), dict) else {}
             items.append({"title": content.get("title", ""), "url": canonical.get("url", ""),

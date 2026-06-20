@@ -43,6 +43,63 @@ class MarketDataEngine:
                   "Status": "Enabled" if news_enabled else "Disabled", "Last success": "", "Last error": ""}]
         return rows
 
+    @staticmethod
+    def _close_values(history) -> pd.Series:
+        if history is None or not isinstance(history, pd.DataFrame) or history.empty or "Close" not in history:
+            return pd.Series(dtype=float)
+        return pd.to_numeric(history["Close"], errors="coerce").dropna()
+
+    def quick_quote(self, symbol: str) -> dict:
+        """Fast price/history waterfall used only by explicit refresh actions."""
+        symbol = str(symbol or "").strip()
+        if not symbol:
+            return {"symbol": "", "latest_price": None, "previous_close": None, "currency": "",
+                    "histories": {}, "provider": "", "fetched_at": "", "error": "Missing price symbol"}
+        errors = []
+        price = self.yahoo.get_price(symbol)
+        recent = self.yahoo.get_history(symbol, "5d") if price.success else self.yahoo.failure("Price unavailable")
+        if price.success and recent.success:
+            histories = {"5d": recent.data["history"]}
+            for period in ("1mo", "1y"):
+                result = self.yahoo.get_history(symbol, period)
+                histories[period] = result.data.get("history", pd.DataFrame()) if result.success else pd.DataFrame()
+            closes = self._close_values(histories["5d"])
+            previous = float(closes.iloc[-2]) if len(closes) >= 2 else None
+            return {"symbol": symbol, "latest_price": float(price.data["price"]),
+                    "previous_close": previous, "currency": price.data.get("currency", ""),
+                    "histories": histories, "provider": self.yahoo.name,
+                    "fetched_at": price.fetched_at, "error": ""}
+        errors.extend(item for item in (price.error, recent.error) if item)
+        stooq = self.stooq.get_price(symbol)
+        if stooq.success and stooq.data.get("history_rows", 0) > 1:
+            history = stooq.data.get("history", pd.DataFrame())
+            closes = self._close_values(history)
+            return {"symbol": symbol, "latest_price": float(stooq.data["price"]),
+                    "previous_close": float(closes.iloc[-2]) if len(closes) >= 2 else None,
+                    "currency": stooq.data.get("currency", ""),
+                    "histories": {"5d": history, "1mo": history, "1y": history},
+                    "provider": self.stooq.name, "fetched_at": stooq.fetched_at, "error": ""}
+        if stooq.error: errors.append(stooq.error)
+        lower = symbol.lower()
+        coin_id = next((coin for coin in CRYPTO_SYMBOLS if coin in lower), "")
+        if not coin_id:
+            coin_id = {"btc-eur": "bitcoin", "btc-usd": "bitcoin", "eth-eur": "ethereum",
+                       "eth-usd": "ethereum", "sol-eur": "solana", "sol-usd": "solana"}.get(lower, "")
+        if coin_id:
+            crypto = self.coingecko.get_price_eur(coin_id)
+            if crypto.success:
+                return {"symbol": symbol, "latest_price": float(crypto.data["price"]),
+                        "previous_close": None, "currency": "EUR", "histories": {},
+                        "provider": self.coingecko.name, "fetched_at": crypto.fetched_at, "error": ""}
+            if crypto.error: errors.append(crypto.error)
+        return {"symbol": symbol, "latest_price": None, "previous_close": None, "currency": "",
+                "histories": {}, "provider": "", "fetched_at": "",
+                "error": "; ".join(dict.fromkeys(errors)) or "Live price unavailable"}
+
+    def fx_rate_to_eur(self, currency: str):
+        """ECB-first FX waterfall with yfinance fallback inside ECBProvider."""
+        return self.ecb.get_rate_to_eur(currency)
+
     def _record(self, asset, result, action):
         if self.event_sink:
             self.event_sink({"asset": asset.get("instrument") or asset.get("isin", ""),
@@ -194,11 +251,8 @@ class MarketDataEngine:
             selected_price = manual; output["price_source"] = "Manual fallback"
         else:
             selected_price = 0.0; output["price_source"] = "Missing"
-        if not is_candidate:
-            quantity = float(output.get("quantity", 0) or 0); buy_in = float(output.get("buy_in_value_eur", 0) or 0)
-            value = quantity * selected_price * float(output.get("fx_rate_to_eur", 0) or 0)
-            output.update({"current_value_eur": round(value, 2), "pl_eur": round(value - buy_in, 2),
-                           "pl_pct": round((value - buy_in) / buy_in * 100, 2) if buy_in else 0})
+        # Position value and P/L are intentionally calculated only in valuation.py.
+        output["selected_price"] = selected_price
         fund_type = str(output.get("asset_type", "")) in {"ETF", "ETC", "ETP"}
         missing_fund_data = fund_type and (not output.get("ter_pct") or not output.get("fund_size_eur"))
         if self.scraping_enabled and (force_web or missing_fund_data or not output.get("price_symbol")):
